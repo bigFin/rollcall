@@ -5,6 +5,7 @@ use std::{
 };
 
 use rusqlite::{Connection, params};
+use serde::Serialize;
 
 use crate::codex::CodexSession;
 
@@ -51,6 +52,18 @@ impl From<serde_json::Error> for StoreError {
 
 pub struct Store {
     connection: Connection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub session: CodexSession,
+    pub settled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_at_unix_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settle_reason: Option<String>,
+    pub last_seen_unix_seconds: u64,
 }
 
 impl Store {
@@ -191,6 +204,41 @@ impl Store {
         snapshots
             .into_iter()
             .map(|snapshot| serde_json::from_str(&snapshot).map_err(Into::into))
+            .collect()
+    }
+
+    pub fn load_history(&self) -> Result<Vec<HistoryEntry>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT snapshot, archived, archived_at, archive_reason, last_seen
+            FROM sessions
+            ORDER BY last_interaction DESC, last_seen DESC
+            ",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(
+                |(snapshot, settled, settled_at, settle_reason, last_seen)| {
+                    Ok(HistoryEntry {
+                        session: serde_json::from_str(&snapshot)?,
+                        settled,
+                        settled_at_unix_seconds: settled_at.and_then(nonnegative_u64),
+                        settle_reason,
+                        last_seen_unix_seconds: nonnegative_u64(last_seen).unwrap_or_default(),
+                    })
+                },
+            )
             .collect()
     }
 
@@ -344,6 +392,10 @@ fn now_unix_seconds() -> i64 {
         })
 }
 
+fn nonnegative_u64(value: i64) -> Option<u64> {
+    u64::try_from(value).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, params};
@@ -415,6 +467,38 @@ mod tests {
 
         assert_eq!(store.load(false).expect("active view should load").len(), 1);
         assert!(store.load(true).expect("archive should load").is_empty());
+    }
+
+    #[test]
+    fn history_combines_active_and_settled_sessions_by_native_recency() {
+        let mut store = Store::open_memory().expect("store should open");
+        let mut older = session("older active");
+        older.id = "topo:codex:older".to_owned();
+        older.native_session_id = "older".to_owned();
+        older.last_interaction_unix_seconds = 100;
+        let mut newer = session("newer settled");
+        newer.id = "topo:codex:newer".to_owned();
+        newer.native_session_id = "newer".to_owned();
+        newer.last_interaction_unix_seconds = 200;
+        store
+            .record(&[older, newer.clone()])
+            .expect("snapshots should save");
+        store
+            .set_archived(&newer.id, true)
+            .expect("newer session should settle");
+
+        let history = store.load_history().expect("history should load");
+
+        assert_eq!(
+            history
+                .iter()
+                .map(|entry| entry.session.title.as_str())
+                .collect::<Vec<_>>(),
+            ["newer settled", "older active"]
+        );
+        assert!(history[0].settled);
+        assert_eq!(history[0].settle_reason.as_deref(), Some("manual"));
+        assert!(!history[1].settled);
     }
 
     #[test]

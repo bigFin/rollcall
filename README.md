@@ -68,6 +68,7 @@ rollcall
 rollcall pick [--host HOST] [--limit N]
 rollcall popup [--host HOST] [--limit N]
 rollcall list [--host HOST] [--limit N | --all]
+rollcall history [--host HOST] [--search QUERY] [--limit N]
 rollcall hosts [--config PATH]
 rollcall attach <session>
 rollcall shell-init [AGENT...]
@@ -126,7 +127,18 @@ sessions with no native interaction for seven days are settled automatically.
 A manually restored stale session stays active until it receives new native
 activity, and new activity automatically wakes a session that Rollcall settled
 for staleness. Manual archives stay settled. A configurable threshold and a
-noninteractive history command remain planned.
+full-text index remain planned.
+
+`rollcall history` reads the local SQLite cache without connecting to any host.
+It combines Active and Settled sessions in native-interaction chronology and
+can filter cached metadata:
+
+```console
+rollcall history
+rollcall history --search "rollcall ownership"
+rollcall history --host coda --limit 20
+rollcall --json history --search kubernetes
+```
 
 Local state is stored in:
 

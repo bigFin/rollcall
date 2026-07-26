@@ -222,7 +222,7 @@ Future extensions should add:
 - Archiving the session containing the current tmux client.
 - A user-configurable stale-after duration.
 - Read-only tmux pane preview before attaching or archiving.
-- History and search across active, archived, and no-longer-present sessions.
+- A full-text index and richer ranking for very large histories.
 
 Automatic staleness must not destroy native artifacts. Archive and deletion are
 separate operations, and deletion is outside the initial scope.

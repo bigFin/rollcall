@@ -10,10 +10,11 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::{
-    codex::{self, CodexError, CodexRuntime},
+    codex::{self, CodexActivity, CodexError, CodexRuntime},
     hosts::{self, HostDiscoveryError, SshHost},
     picker::{self, PickerError},
     shell::{self, ShellError},
+    store::{DEFAULT_STALE_AFTER_SECONDS, HistoryEntry, Store, StoreError},
     tmux::{self, TmuxError},
 };
 
@@ -50,8 +51,20 @@ enum Command {
         all: bool,
     },
 
-    /// List all known sessions by chronology
-    History,
+    /// Search all cached sessions by native chronology without contacting hosts
+    History {
+        /// Restrict history to one observed host
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+
+        /// Match words across titles, messages, paths, hosts, states, and IDs
+        #[arg(long, value_name = "QUERY")]
+        search: Option<String>,
+
+        /// Return at most this many matching sessions
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
 
     /// Open the interactive session picker
     Pick {
@@ -113,6 +126,7 @@ enum CliError {
     Picker(PickerError),
     Serialization(serde_json::Error),
     Shell(ShellError),
+    Store(StoreError),
     Tmux(TmuxError),
     NotImplemented(&'static str),
 }
@@ -125,6 +139,7 @@ impl fmt::Display for CliError {
             Self::Picker(error) => write!(formatter, "{error}"),
             Self::Serialization(error) => write!(formatter, "could not serialize output: {error}"),
             Self::Shell(error) => write!(formatter, "{error}"),
+            Self::Store(error) => write!(formatter, "{error}"),
             Self::Tmux(error) => write!(formatter, "{error}"),
             Self::NotImplemented(feature) => {
                 write!(formatter, "{feature} is not implemented yet")
@@ -160,6 +175,12 @@ impl From<ShellError> for CliError {
 impl From<PickerError> for CliError {
     fn from(error: PickerError) -> Self {
         Self::Picker(error)
+    }
+}
+
+impl From<StoreError> for CliError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
     }
 }
 
@@ -209,7 +230,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
             };
             print_sessions(&host, limit, cli.json)
         }
-        Command::History => Err(CliError::NotImplemented("session history")),
+        Command::History {
+            host,
+            search,
+            limit,
+        } => print_history(host.as_deref(), search.as_deref(), limit, cli.json),
         Command::Pick { host, limit } => picker::run(&host, limit).map_err(Into::into),
         Command::Popup { host, limit } => picker::popup(&host, limit).map_err(Into::into),
         Command::Hosts { config } => print_hosts(config.as_deref(), cli.json),
@@ -221,6 +246,104 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Tmux { host } => print_tmux_sessions(&host, cli.json),
         Command::Watch => Err(CliError::NotImplemented("lifecycle event streaming")),
     }
+}
+
+fn print_history(
+    host: Option<&str>,
+    search: Option<&str>,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<(), CliError> {
+    let store = Store::open()?;
+    store.auto_settle_stale(DEFAULT_STALE_AFTER_SECONDS)?;
+    let mut history = store
+        .load_history()?
+        .into_iter()
+        .filter(|entry| history_matches(entry, host, search))
+        .collect::<Vec<_>>();
+    if let Some(limit) = limit {
+        history.truncate(limit);
+    }
+
+    if json {
+        return print_json_inventory("history", history);
+    }
+    if history.is_empty() {
+        println!("No cached sessions matched the history query.");
+        return Ok(());
+    }
+
+    let titles = history
+        .iter()
+        .map(|entry| truncate(&entry.session.title, 42))
+        .collect::<Vec<_>>();
+    let working_directories = history
+        .iter()
+        .map(|entry| truncate(&entry.session.cwd, 36))
+        .collect::<Vec<_>>();
+    let title_width = titles
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or_default()
+        .max("TITLE".len());
+    let host_width = history
+        .iter()
+        .map(|entry| entry.session.host.len())
+        .max()
+        .unwrap_or_default()
+        .max("HOST".len());
+    let cwd_width = working_directories
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or_default()
+        .max("CWD".len());
+
+    println!(
+        "{:<title_width$}  {:<host_width$}  {:<7}  {:<9}  {:<9}  {:>16}  {:<cwd_width$}  ID",
+        "TITLE", "HOST", "VIEW", "STATUS", "OWNER", "LAST INTERACTION", "CWD"
+    );
+    for ((entry, title), cwd) in history.into_iter().zip(titles).zip(working_directories) {
+        println!(
+            "{:<title_width$}  {:<host_width$}  {:<7}  {:<9}  {:<9}  {:>16}  {:<cwd_width$}  {}",
+            title,
+            entry.session.host,
+            if entry.settled { "settled" } else { "active" },
+            activity_label(entry.session.activity),
+            runtime_label(entry.session.runtime),
+            format_age(entry.session.last_interaction_unix_seconds),
+            cwd,
+            entry.session.id
+        );
+    }
+    Ok(())
+}
+
+fn history_matches(entry: &HistoryEntry, host: Option<&str>, search: Option<&str>) -> bool {
+    if host.is_some_and(|host| entry.session.host != host) {
+        return false;
+    }
+    let Some(search) = search.filter(|search| !search.trim().is_empty()) else {
+        return true;
+    };
+    let corpus = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        entry.session.title,
+        entry.session.last_message,
+        entry.session.cwd,
+        entry.session.host,
+        entry.session.id,
+        entry.session.native_session_id,
+        activity_label(entry.session.activity),
+        runtime_label(entry.session.runtime),
+        if entry.settled { "settled" } else { "active" },
+        entry.settle_reason.as_deref().unwrap_or_default(),
+    )
+    .to_lowercase();
+    search
+        .split_whitespace()
+        .all(|term| corpus.contains(&term.to_lowercase()))
 }
 
 fn attach(session: &str) -> Result<(), CliError> {
@@ -307,6 +430,17 @@ fn runtime_label(runtime: CodexRuntime) -> &'static str {
         CodexRuntime::SharedBackend => "backend",
         CodexRuntime::ExternalFrontend => "external",
         CodexRuntime::TmuxFrontend => "tmux",
+    }
+}
+
+fn activity_label(activity: CodexActivity) -> &'static str {
+    match activity {
+        CodexActivity::Working => "working",
+        CodexActivity::WaitingApproval => "approval",
+        CodexActivity::WaitingInput => "input",
+        CodexActivity::Completed => "completed",
+        CodexActivity::Failed => "failed",
+        CodexActivity::Unknown => "unknown",
     }
 }
 
@@ -459,8 +593,13 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Command, format_age, runtime_label, truncate};
-    use crate::codex::CodexRuntime;
+    use super::{
+        Cli, Command, activity_label, format_age, history_matches, runtime_label, truncate,
+    };
+    use crate::{
+        codex::{CodexActivity, CodexRuntime, CodexSession},
+        store::HistoryEntry,
+    };
 
     #[test]
     fn no_subcommand_uses_the_default_active_view() {
@@ -542,6 +681,30 @@ mod tests {
     }
 
     #[test]
+    fn history_accepts_host_search_and_limit_filters() {
+        let cli = Cli::try_parse_from([
+            "rollcall",
+            "history",
+            "--host",
+            "coda",
+            "--search",
+            "rollcall picker",
+            "--limit",
+            "12",
+        ])
+        .expect("history filters should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::History {
+                host: Some(host),
+                search: Some(search),
+                limit: Some(12),
+            }) if host == "coda" && search == "rollcall picker"
+        ));
+    }
+
+    #[test]
     fn raw_tmux_inventory_is_explicit() {
         let cli = Cli::try_parse_from(["rollcall", "tmux", "--host", "coda"])
             .expect("tmux command should parse");
@@ -588,6 +751,14 @@ mod tests {
     }
 
     #[test]
+    fn codex_activity_labels_are_compact() {
+        assert_eq!(activity_label(CodexActivity::Working), "working");
+        assert_eq!(activity_label(CodexActivity::WaitingApproval), "approval");
+        assert_eq!(activity_label(CodexActivity::WaitingInput), "input");
+        assert_eq!(activity_label(CodexActivity::Completed), "completed");
+    }
+
+    #[test]
     fn table_values_are_truncated_by_characters() {
         assert_eq!(truncate("hello", 5), "hello");
         assert_eq!(truncate("hellos", 5), "hello…");
@@ -605,5 +776,37 @@ mod tests {
         assert_eq!(format_age(now.saturating_sub(120)), "2m ago");
         assert_eq!(format_age(now.saturating_sub(7_200)), "2h ago");
         assert_eq!(format_age(now.saturating_sub(172_800)), "2d ago");
+    }
+
+    #[test]
+    fn history_search_matches_all_terms_across_cached_metadata() {
+        let entry = HistoryEntry {
+            session: CodexSession {
+                id: "topo:codex:019f".to_owned(),
+                host: "topo".to_owned(),
+                native_session_id: "019f".to_owned(),
+                title: "Rollcall picker".to_owned(),
+                cwd: "/home/fin/projects/rollcall".to_owned(),
+                source: "cli".to_owned(),
+                activity: CodexActivity::Completed,
+                last_message: "Ownership boundary is ready.".to_owned(),
+                last_interaction_unix_seconds: 100,
+                updated_unix_seconds: 100,
+                runtime: CodexRuntime::Resumable,
+                tmux: None,
+            },
+            settled: true,
+            settled_at_unix_seconds: Some(200),
+            settle_reason: Some("manual".to_owned()),
+            last_seen_unix_seconds: 200,
+        };
+
+        assert!(history_matches(
+            &entry,
+            Some("topo"),
+            Some("rollcall ownership settled")
+        ));
+        assert!(!history_matches(&entry, Some("coda"), None));
+        assert!(!history_matches(&entry, None, Some("rollcall missing")));
     }
 }
