@@ -75,7 +75,8 @@ impl SessionTransitionKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionTransition {
     pub session_id: String,
     pub title: String,

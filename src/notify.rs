@@ -53,22 +53,25 @@ fn dispatch(notification: Notification) {
     match env::var_os(NOTIFY_COMMAND_ENV) {
         Some(command) if command.is_empty() => {}
         Some(command) => {
-            std::thread::spawn(move || {
-                let _ = Command::new("sh")
-                    .args(["-lc", &command.to_string_lossy()])
-                    .env("ROLLCALL_NOTIFICATION_KIND", notification.kind)
-                    .env("ROLLCALL_NOTIFICATION_TITLE", notification.title)
-                    .env("ROLLCALL_NOTIFICATION_BODY", notification.body)
-                    .env("ROLLCALL_NOTIFICATION_HOST", notification.host)
-                    .env(
-                        "ROLLCALL_NOTIFICATION_SESSION_ID",
-                        notification.session_id.unwrap_or_default(),
-                    )
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            });
+            if let Ok(mut child) = Command::new("sh")
+                .args(["-lc", &command.to_string_lossy()])
+                .env("ROLLCALL_NOTIFICATION_KIND", notification.kind)
+                .env("ROLLCALL_NOTIFICATION_TITLE", notification.title)
+                .env("ROLLCALL_NOTIFICATION_BODY", notification.body)
+                .env("ROLLCALL_NOTIFICATION_HOST", notification.host)
+                .env(
+                    "ROLLCALL_NOTIFICATION_SESSION_ID",
+                    notification.session_id.unwrap_or_default(),
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
         }
         None => {
             #[cfg(not(test))]

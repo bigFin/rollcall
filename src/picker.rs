@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
-    env, fmt, io,
+    env, fmt,
+    io::{self, Write},
     path::Path,
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
@@ -91,6 +92,26 @@ pub fn run(initial_host: &str, limit: usize) -> Result<(), PickerError> {
         app.acknowledge_session(&session_id, false)?;
     }
     Ok(())
+}
+
+pub fn watch(initial_host: &str, limit: usize, once: bool, json: bool) -> Result<(), PickerError> {
+    let (transition_tx, transition_rx) = mpsc::channel();
+    let mut app = PickerApp::new_watch(initial_host, limit, transition_tx)?;
+    let mut stdout = io::stdout().lock();
+
+    loop {
+        app.drain_refresh_events()?;
+        while let Ok(transition) = transition_rx.try_recv() {
+            write_transition(&mut stdout, &transition, json)?;
+        }
+        app.maybe_start_host_refreshes();
+        if once && app.initial_refresh_complete() {
+            stdout.flush()?;
+            return Ok(());
+        }
+        app.maybe_start_activity_poll();
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
 pub fn popup(initial_host: &str, limit: usize) -> Result<(), PickerError> {
@@ -323,6 +344,8 @@ struct PickerApp {
     host_errors: BTreeMap<String, String>,
     fresh_ids: HashSet<String>,
     unread_ids: HashSet<String>,
+    transition_tx: Option<Sender<SessionTransition>>,
+    initial_targets_remaining: BTreeSet<String>,
     refresh_generation: u64,
     refresh_tx: Sender<RefreshEvent>,
     refresh_rx: Receiver<RefreshEvent>,
@@ -339,13 +362,34 @@ struct PickerApp {
 
 impl PickerApp {
     fn new(initial_host: &str, limit: usize) -> Result<Self, PickerError> {
-        let discovery_targets = discovery_targets()?;
+        Self::new_inner(initial_host, limit, None, false)
+    }
+
+    fn new_watch(
+        initial_host: &str,
+        limit: usize,
+        transition_tx: Sender<SessionTransition>,
+    ) -> Result<Self, PickerError> {
+        Self::new_inner(initial_host, limit, Some(transition_tx), true)
+    }
+
+    fn new_inner(
+        initial_host: &str,
+        limit: usize,
+        transition_tx: Option<Sender<SessionTransition>>,
+        restrict_targets: bool,
+    ) -> Result<Self, PickerError> {
+        let mut discovery_targets = discovery_targets()?;
+        if restrict_targets {
+            discovery_targets = restrict_discovery_targets(discovery_targets, initial_host);
+        }
         let now = Instant::now();
         let reconnect = discovery_targets
             .iter()
             .cloned()
             .map(|target| (target, HostReconnectState::new(now)))
             .collect();
+        let initial_targets_remaining = discovery_targets.iter().cloned().collect();
         let store = Store::open()?;
         let (refresh_tx, refresh_rx) = mpsc::channel();
         let host_filter = normalize_host_filter(initial_host);
@@ -369,6 +413,8 @@ impl PickerApp {
             host_errors: BTreeMap::new(),
             fresh_ids: HashSet::new(),
             unread_ids: HashSet::new(),
+            transition_tx,
+            initial_targets_remaining,
             refresh_generation: 0,
             refresh_tx,
             refresh_rx,
@@ -934,6 +980,7 @@ impl PickerApp {
                 mut sessions,
             } if generation == self.refresh_generation => {
                 self.pending_hosts.remove(&target);
+                self.initial_targets_remaining.remove(&target);
                 self.host_errors.remove(&target);
                 self.reachable_hosts.insert(target.clone());
                 self.enriching_hosts.insert(target.clone());
@@ -974,6 +1021,7 @@ impl PickerApp {
                 error,
             } if generation == self.refresh_generation => {
                 self.pending_hosts.remove(&target);
+                self.initial_targets_remaining.remove(&target);
                 self.enriching_hosts.remove(&target);
                 self.reachable_hosts.remove(&target);
                 self.activity_pending.remove(&target);
@@ -1118,6 +1166,9 @@ impl PickerApp {
         for transition in transitions {
             self.unread_ids.insert(transition.session_id.clone());
             notify::session_transition(transition);
+            if let Some(sender) = &self.transition_tx {
+                let _ = sender.send(transition.clone());
+            }
         }
         self.notice = if let [transition] = transitions {
             Some((
@@ -1219,6 +1270,13 @@ impl PickerApp {
         {
             self.notice = None;
         }
+    }
+
+    fn initial_refresh_complete(&self) -> bool {
+        self.initial_targets_remaining.is_empty()
+            && self.pending_hosts.is_empty()
+            && self.enriching_hosts.is_empty()
+            && self.activity_pending.is_empty()
     }
 
     fn target_for_observed_host(&self, host: &str) -> Option<&String> {
@@ -1541,6 +1599,29 @@ fn discovery_targets() -> Result<Vec<String>, HostDiscoveryError> {
     Ok(deduplicate_discovery_targets(hosts::discover(None)?))
 }
 
+fn restrict_discovery_targets(targets: Vec<String>, host: &str) -> Vec<String> {
+    if host == ALL_HOSTS {
+        return targets;
+    }
+    if host == "local" {
+        return vec!["local".to_owned()];
+    }
+    if targets.iter().any(|target| target == host) {
+        return vec![host.to_owned()];
+    }
+
+    let observed_host = normalize_host_filter(host);
+    let matching = targets
+        .into_iter()
+        .filter(|target| target == host || codex::observed_host(target) == observed_host)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        vec![host.to_owned()]
+    } else {
+        matching
+    }
+}
+
 fn deduplicate_discovery_targets(hosts: Vec<SshHost>) -> Vec<String> {
     let mut endpoints: BTreeMap<(String, Option<String>, u16), String> = BTreeMap::new();
     for host in hosts
@@ -1561,6 +1642,27 @@ fn deduplicate_discovery_targets(hosts: Vec<SshHost>) -> Vec<String> {
     targets.sort();
     targets.insert(0, "local".to_owned());
     targets
+}
+
+fn write_transition(
+    writer: &mut impl Write,
+    transition: &SessionTransition,
+    json: bool,
+) -> io::Result<()> {
+    if json {
+        let line = serde_json::to_string(transition).map_err(io::Error::other)?;
+        writeln!(writer, "{line}")
+    } else {
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}\t{}",
+            transition.observed_at_unix_seconds,
+            transition.kind.as_str(),
+            transition.host,
+            transition.title.replace(['\t', '\n', '\r'], " "),
+            transition.session_id
+        )
+    }
 }
 
 fn session_needs_detail(
@@ -2401,7 +2503,8 @@ mod tests {
     use super::{
         Action, DashboardRow, DashboardView, InputMode, PickerApp, PreviewContent, RefreshEvent,
         deduplicate_discovery_targets, format_age, normalize_host_filter, preview_window,
-        session_matches, session_needs_detail, truncate_with_ellipsis, wrap_preview_body,
+        restrict_discovery_targets, session_matches, session_needs_detail, truncate_with_ellipsis,
+        wrap_preview_body, write_transition,
     };
     use crate::{
         codex::{
@@ -2409,7 +2512,7 @@ mod tests {
             TmuxBinding,
         },
         hosts::{ConnectivityState, SshHost},
-        store::Store,
+        store::{SessionTransition, SessionTransitionKind, Store},
     };
 
     fn session(id: &str, cwd: &str, title: &str) -> CodexSession {
@@ -2826,6 +2929,91 @@ mod tests {
     }
 
     #[test]
+    fn watch_restricts_network_work_to_the_selected_host() {
+        let targets = vec!["local".to_owned(), "aurkitu".to_owned(), "coda".to_owned()];
+
+        assert_eq!(
+            restrict_discovery_targets(targets.clone(), "local"),
+            ["local"]
+        );
+        assert_eq!(
+            restrict_discovery_targets(targets.clone(), "coda"),
+            ["coda"]
+        );
+        assert_eq!(
+            restrict_discovery_targets(targets, "unlisted"),
+            ["unlisted"]
+        );
+    }
+
+    #[test]
+    fn watch_transition_output_supports_text_and_json_lines() {
+        let transition = SessionTransition {
+            session_id: "topo:codex:019f".to_owned(),
+            title: "Needs\tattention".to_owned(),
+            host: "topo".to_owned(),
+            kind: SessionTransitionKind::Input,
+            observed_at_unix_seconds: 100,
+        };
+        let mut text = Vec::new();
+        write_transition(&mut text, &transition, false).expect("text event should render");
+        assert_eq!(
+            String::from_utf8(text).expect("text should be UTF-8"),
+            "100\tinput\ttopo\tNeeds attention\ttopo:codex:019f\n"
+        );
+
+        let mut json = Vec::new();
+        write_transition(&mut json, &transition, true).expect("JSON event should render");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&json).expect("event should be JSON"),
+            serde_json::json!({
+                "sessionId": "topo:codex:019f",
+                "title": "Needs\tattention",
+                "host": "topo",
+                "kind": "input",
+                "observedAtUnixSeconds": 100,
+            })
+        );
+    }
+
+    #[test]
+    fn watch_receives_the_same_transitions_as_the_picker() {
+        let (sender, receiver) = mpsc::channel();
+        let mut app = app_with_sessions(Vec::new(), Vec::new());
+        app.transition_tx = Some(sender);
+        let transition = SessionTransition {
+            session_id: "topo:codex:019f".to_owned(),
+            title: "Ready".to_owned(),
+            host: "topo".to_owned(),
+            kind: SessionTransitionKind::Completed,
+            observed_at_unix_seconds: 100,
+        };
+
+        app.handle_transitions(std::slice::from_ref(&transition));
+
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("watch should receive transition"),
+            transition
+        );
+    }
+
+    #[test]
+    fn one_shot_watch_finishes_after_initial_work_drains() {
+        let mut app = app_with_sessions(Vec::new(), Vec::new());
+        app.initial_targets_remaining.insert("local".to_owned());
+        assert!(!app.initial_refresh_complete());
+
+        app.initial_targets_remaining.clear();
+        app.pending_hosts.insert("local".to_owned());
+        assert!(!app.initial_refresh_complete());
+
+        app.pending_hosts.clear();
+        assert!(app.initial_refresh_complete());
+    }
+
+    #[test]
     fn unchanged_sessions_with_messages_skip_expensive_detail_reads() {
         let session = session("019f", "/fabric", "Rollcall");
         let cached = BTreeMap::from([(
@@ -2890,6 +3078,8 @@ mod tests {
             host_errors: BTreeMap::new(),
             fresh_ids,
             unread_ids: HashSet::new(),
+            transition_tx: None,
+            initial_targets_remaining: BTreeSet::new(),
             refresh_generation: 0,
             refresh_tx,
             refresh_rx,

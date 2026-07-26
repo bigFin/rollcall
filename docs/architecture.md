@@ -8,6 +8,7 @@ The current slice is one binary that probes hosts on demand:
 rollcall                    interactive session picker
 rollcall popup              picker in a tmux popup
 rollcall list --json        scriptable inventory client
+rollcall watch              foreground lifecycle observer
 rollcall attach <session>   native terminal handoff
 ```
 
@@ -19,6 +20,10 @@ A meaningful lifecycle transition updates persistent unread state and emits a
 best-effort local notification while the picker is running. The default
 notification is a terminal bell; an optional command hook supports desktop and
 Termux notification systems without adding a required dependency.
+`rollcall watch` runs the same observer loop without the TUI, streams normalized
+transition records, and can remain in an ordinary terminal or tmux pane for as
+long as monitoring is useful. Its `--once` mode provides a bounded reconciliation
+primitive for external timers without turning Rollcall itself into a service.
 A later observation layer may add a lazily started local broker for
 notifications and monitoring between picker invocations. If added, it should
 communicate over a Unix-domain socket and exit after an idle period rather than

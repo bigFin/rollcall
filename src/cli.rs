@@ -115,8 +115,20 @@ enum Command {
         host: String,
     },
 
-    /// Stream normalized lifecycle events
-    Watch,
+    /// Observe hosts and stream normalized lifecycle events
+    Watch {
+        /// Observe all configured hosts or restrict monitoring to one host
+        #[arg(long, default_value = "all", value_name = "HOST")]
+        host: String,
+
+        /// Load at most this many sessions per host
+        #[arg(long, default_value_t = DEFAULT_SESSION_LIMIT, value_name = "N")]
+        limit: usize,
+
+        /// Reconcile each selected host once, emit transitions, and exit
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -128,7 +140,6 @@ enum CliError {
     Shell(ShellError),
     Store(StoreError),
     Tmux(TmuxError),
-    NotImplemented(&'static str),
 }
 
 impl fmt::Display for CliError {
@@ -141,9 +152,6 @@ impl fmt::Display for CliError {
             Self::Shell(error) => write!(formatter, "{error}"),
             Self::Store(error) => write!(formatter, "{error}"),
             Self::Tmux(error) => write!(formatter, "{error}"),
-            Self::NotImplemented(feature) => {
-                write!(formatter, "{feature} is not implemented yet")
-            }
         }
     }
 }
@@ -244,7 +252,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
             Ok(())
         }
         Command::Tmux { host } => print_tmux_sessions(&host, cli.json),
-        Command::Watch => Err(CliError::NotImplemented("lifecycle event streaming")),
+        Command::Watch { host, limit, once } => {
+            picker::watch(&host, limit, once, cli.json).map_err(Into::into)
+        }
     }
 }
 
@@ -742,6 +752,23 @@ mod tests {
             }
             _ => panic!("expected popup command"),
         }
+    }
+
+    #[test]
+    fn watch_supports_host_limit_and_one_shot_reconciliation() {
+        let cli = Cli::try_parse_from([
+            "rollcall", "watch", "--host", "coda", "--limit", "12", "--once",
+        ])
+        .expect("watch options should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Watch {
+                host,
+                limit: 12,
+                once: true,
+            }) if host == "coda"
+        ));
     }
 
     #[test]

@@ -73,6 +73,7 @@ rollcall list [--host HOST] [--limit N | --all]
 rollcall history [--host HOST] [--search QUERY] [--limit N]
 rollcall hosts [--config PATH]
 rollcall attach <session>
+rollcall watch [--host HOST] [--limit N] [--once]
 rollcall shell-init [AGENT...]
 rollcall tmux [--host HOST]
 ```
@@ -152,6 +153,32 @@ command to an empty value to disable both the hook and default bell.
 There is still no background daemon. If a turn finishes while Rollcall is
 closed, it becomes unread the next time a picker refresh can compare the new
 native state with its previous snapshot.
+
+For notification monitoring without keeping the picker open, run the foreground
+observer:
+
+```console
+rollcall watch
+rollcall watch --host coda
+rollcall --json watch
+```
+
+It uses the same bounded host scheduler, live lifecycle polling, adaptive
+reconnection, persistent unread state, and notification hook as the picker.
+Events are written as tab-separated lines, or as newline-delimited JSON with
+`--json`. The process remains attached to the invoking terminal and stops
+normally with `Ctrl-C`; it is not a daemon and installs nothing remotely.
+
+For a cron, timer, or Termux task that should reconcile once and exit:
+
+```console
+rollcall watch --once
+```
+
+One-shot mode checks each selected host once, emits any newly observed
+transitions, updates the cache, and exits after detail and live-state probes
+finish. Unavailable hosts remain represented by their existing cached rows
+rather than being retried indefinitely in one-shot mode.
 
 From an ordinary shell inside tmux:
 
