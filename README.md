@@ -35,7 +35,8 @@ unique SSH endpoint through a bounded scheduler. Basic session rows arrive
 first; last-agent messages fill in afterward without blocking the interface.
 Active and Settled views, reversible archive state, status indicators, search,
 host filtering, live lifecycle polling, adaptive reconnection, seven-day
-automatic settling, and offline cached sessions are implemented.
+automatic settling, offline cached sessions, and on-demand session previews are
+implemented.
 
 Codex inventory and resumed TUIs now converge on one lazily started app-server
 per host and `CODEX_HOME`. Additional coding-agent adapters, persistent
@@ -90,6 +91,7 @@ Picker keys:
 ```text
 j/k or arrows  move
 enter          attach or resume
+p              preview the live tmux pane or cached response
 /              filter visible sessions
 h              select an SSH host
 tab            switch Active/Settled views
@@ -103,10 +105,13 @@ q or esc       quit
 Enter on a Settled row restores it before attaching. Search applies to both
 views and matches titles, last messages, directories, hosts, statuses, native
 IDs, and tmux bindings. Host selection is a filter over the shared dashboard,
-not a destructive reload. Press `i` at normal terminal heights to show a
-selected-session strip with the fuller title, latest response, path, host, age,
-runtime, and native identifier without making every dashboard row taller by
-default.
+not a destructive reload. Press `p` to inspect recent output from an attachable
+tmux pane without leaving the picker; resumable, external, offline, and
+backend-only rows fall back to their cached response and metadata. The preview
+captures only when opened rather than polling pane contents continuously.
+Within it, `Enter` opens the session, `a` settles or restores it, `j/k` scrolls,
+and `Esc` closes it. Press `i` at normal terminal heights to show a compact
+selected-session strip without making every dashboard row taller by default.
 
 From an ordinary shell inside tmux:
 

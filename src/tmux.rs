@@ -178,6 +178,38 @@ pub fn attach_pane(host: &str, session_name: &str, pane: &str) -> Result<(), Tmu
     }
 }
 
+pub fn capture_pane(
+    host: &str,
+    session_name: &str,
+    pane: &str,
+    lines: usize,
+) -> Result<String, TmuxError> {
+    let target = TmuxTarget {
+        host: host.to_owned(),
+        name: session_name.to_owned(),
+    };
+    let (program, arguments) = capture_pane_command(&target, pane, lines, &local_hostname())?;
+    let output = Command::new(program)
+        .args(&arguments)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|source| TmuxError::Start { program, source })?;
+
+    if output.status.success() {
+        Ok(sanitize_capture(&String::from_utf8_lossy(&output.stdout)))
+    } else {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(TmuxError::CommandFailed {
+            context: format!("capturing {} pane {pane}", target.id()),
+            message: if message.is_empty() {
+                output.status.to_string()
+            } else {
+                message
+            },
+        })
+    }
+}
+
 pub fn rename_session(host: &str, current: &str, desired: &str) -> Result<(), TmuxError> {
     if current == desired {
         return Ok(());
@@ -405,6 +437,51 @@ fn attach_pane_command(
     ))
 }
 
+fn capture_pane_command(
+    target: &TmuxTarget,
+    pane: &str,
+    lines: usize,
+    local_hostname: &str,
+) -> Result<(&'static str, Vec<String>), TmuxError> {
+    let start = format!("-{}", lines.clamp(1, 1_000));
+    let tmux_arguments = ["tmux", "capture-pane", "-p", "-J", "-S", &start, "-t", pane];
+    if target.host == "local" || target.host == local_hostname {
+        return Ok((
+            "tmux",
+            tmux_arguments[1..]
+                .iter()
+                .map(|argument| (*argument).to_owned())
+                .collect(),
+        ));
+    }
+
+    let remote_command = shlex::try_join(tmux_arguments)?;
+    Ok((
+        "ssh",
+        vec![
+            "-T".to_owned(),
+            "-o".to_owned(),
+            "BatchMode=yes".to_owned(),
+            "-o".to_owned(),
+            "ConnectTimeout=5".to_owned(),
+            "-o".to_owned(),
+            "ConnectionAttempts=1".to_owned(),
+            "--".to_owned(),
+            target.host.to_owned(),
+            remote_command,
+        ],
+    ))
+}
+
+fn sanitize_capture(capture: &str) -> String {
+    capture
+        .chars()
+        .filter(|character| *character == '\n' || *character == '\t' || !character.is_control())
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
 fn rename_session_command(
     target: &TmuxTarget,
     desired: &str,
@@ -498,8 +575,9 @@ fn resume_codex_command(
 #[cfg(test)]
 mod tests {
     use super::{
-        TmuxTarget, attach_command, attach_pane_command, is_missing_tmux_server, parse_session,
-        parse_target, rename_session_command, resume_codex_command,
+        TmuxTarget, attach_command, attach_pane_command, capture_pane_command,
+        is_missing_tmux_server, parse_session, parse_target, rename_session_command,
+        resume_codex_command, sanitize_capture,
     };
 
     #[test]
@@ -650,6 +728,57 @@ mod tests {
                 "-t",
                 "fabric"
             ]
+        );
+    }
+
+    #[test]
+    fn local_pane_capture_is_bounded_and_targets_the_exact_pane() {
+        let target = TmuxTarget {
+            host: "topo".to_owned(),
+            name: "agents".to_owned(),
+        };
+        let (program, arguments) =
+            capture_pane_command(&target, "%19", 80, "topo").expect("command should build");
+
+        assert_eq!(program, "tmux");
+        assert_eq!(
+            arguments,
+            ["capture-pane", "-p", "-J", "-S", "-80", "-t", "%19"]
+        );
+    }
+
+    #[test]
+    fn remote_pane_capture_uses_noninteractive_bounded_ssh() {
+        let target = TmuxTarget {
+            host: "coda".to_owned(),
+            name: "agents".to_owned(),
+        };
+        let (program, arguments) =
+            capture_pane_command(&target, "%19", 5_000, "topo").expect("command should build");
+
+        assert_eq!(program, "ssh");
+        assert!(arguments.iter().any(|argument| argument == "BatchMode=yes"));
+        assert_eq!(
+            shlex::split(arguments.last().expect("remote command"))
+                .expect("remote command should parse"),
+            [
+                "tmux",
+                "capture-pane",
+                "-p",
+                "-J",
+                "-S",
+                "-1000",
+                "-t",
+                "%19"
+            ]
+        );
+    }
+
+    #[test]
+    fn pane_capture_removes_terminal_control_characters() {
+        assert_eq!(
+            sanitize_capture("line one\u{1b}[31m\nline\ttwo\r\n\n"),
+            "line one[31m\nline\ttwo"
         );
     }
 

@@ -169,6 +169,13 @@ creates or reuses a deterministic tmux session and launches
 inventory client and resumed terminal TUIs converge on the same internal
 app-server. Other frontends remain independent and are reported distinctly.
 
+The picker can capture a bounded tail of an attachable pane on demand. Local
+capture uses `tmux capture-pane`; remote capture runs the same command through a
+short, noninteractive SSH request. Capture is asynchronous and happens only
+when the user opens a preview, so Rollcall does not continuously scrape terminal
+contents. Sessions without an attachable pane use their cached response and
+metadata instead.
+
 An external process is not reopened implicitly because an ordinary Codex CLI,
 T3 Code app-server, desktop application, or IDE process does not expose a
 portable terminal attachment point. The shell shim prevents this for future
@@ -221,7 +228,6 @@ Future extensions should add:
 
 - Archiving the session containing the current tmux client.
 - A user-configurable stale-after duration.
-- Read-only tmux pane preview before attaching or archiving.
 - A full-text index and richer ranking for very large histories.
 
 Automatic staleness must not destroy native artifacts. Archive and deletion are
@@ -259,6 +265,12 @@ and Codex interaction age. Working markers pulse; completed rows use a quiet
 dim checkmark. Runtime, full path, and native identity are progressively
 disclosed through the optional detail strip. A loaded-outside-tmux row is
 visible for awareness and follows the explicit reopen policy above.
+
+An on-demand preview overlay shows the newest portion of a live tmux pane when
+one is safely attachable, otherwise the last cached response. It supports
+scrolling, attach/resume, and settle/restore without turning Rollcall into a
+conversation renderer. Capture failures retain the cached fallback and explain
+the live error.
 
 Ordinary text deliberately uses the terminal's default foreground/background.
 Secondary metadata uses the terminal `DIM` attribute, and selected rows use

@@ -27,6 +27,7 @@ use crate::{
     hosts::{self, HostDiscoveryError, SshHost},
     reconnect::{HostPhase, HostReconnectState, classify_failure},
     store::{DEFAULT_STALE_AFTER_SECONDS, Store, StoreError},
+    tmux,
 };
 
 const ALL_HOSTS: &str = "all";
@@ -34,6 +35,7 @@ const LOCAL_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const REMOTE_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_HOST_REFRESHES: usize = 4;
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
+const PREVIEW_CAPTURE_LINES: usize = 120;
 
 #[derive(Debug)]
 pub enum PickerError {
@@ -201,6 +203,7 @@ enum InputMode {
     Search,
     Hosts,
     Help,
+    Preview,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -269,6 +272,29 @@ enum RefreshEvent {
         target: String,
         observations: Result<BTreeMap<String, codex::LiveObservation>, String>,
     },
+    Preview {
+        request_id: u64,
+        session_id: String,
+        result: Result<String, String>,
+    },
+}
+
+#[derive(Debug)]
+enum PreviewContent {
+    Loading,
+    Ready { source: &'static str, body: String },
+    Failed { error: String, fallback: String },
+}
+
+#[derive(Debug)]
+struct SessionPreview {
+    request_id: u64,
+    session_id: String,
+    title: String,
+    host: String,
+    scroll_from_bottom: usize,
+    notice: Option<String>,
+    content: PreviewContent,
 }
 
 struct PickerApp {
@@ -300,6 +326,8 @@ struct PickerApp {
     limit: usize,
     status: Option<String>,
     notice: Option<(String, Instant)>,
+    preview_request_id: u64,
+    preview: Option<SessionPreview>,
 }
 
 impl PickerApp {
@@ -343,6 +371,8 @@ impl PickerApp {
             limit,
             status: None,
             notice: None,
+            preview_request_id: 0,
+            preview: None,
         };
         app.reload_snapshots()?;
         app.rebuild_host_choices();
@@ -357,6 +387,7 @@ impl PickerApp {
             InputMode::Search => self.handle_search_key(key),
             InputMode::Hosts => self.handle_host_key(key),
             InputMode::Help => self.handle_help_key(key),
+            InputMode::Preview => self.handle_preview_key(key),
         }
     }
 
@@ -382,6 +413,10 @@ impl PickerApp {
             KeyCode::Char('i') => {
                 self.show_details = !self.show_details;
                 self.status = None;
+                Action::None
+            }
+            KeyCode::Char('p') => {
+                self.start_preview();
                 Action::None
             }
             KeyCode::Tab => {
@@ -479,20 +514,108 @@ impl PickerApp {
         Action::None
     }
 
+    fn handle_preview_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q' | 'p') => {
+                self.close_preview();
+                Action::None
+            }
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::PageDown => {
+                if let Some(preview) = self.preview.as_mut() {
+                    preview.scroll_from_bottom = preview
+                        .scroll_from_bottom
+                        .saturating_sub(if key.code == KeyCode::PageDown { 10 } else { 1 });
+                }
+                Action::None
+            }
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::PageUp => {
+                if let Some(preview) = self.preview.as_mut() {
+                    preview.scroll_from_bottom = preview
+                        .scroll_from_bottom
+                        .saturating_add(if key.code == KeyCode::PageUp { 10 } else { 1 });
+                }
+                Action::None
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                if let Some(preview) = self.preview.as_mut() {
+                    preview.scroll_from_bottom = usize::MAX;
+                }
+                Action::None
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                if let Some(preview) = self.preview.as_mut() {
+                    preview.scroll_from_bottom = 0;
+                }
+                Action::None
+            }
+            KeyCode::Char('a') => {
+                let Some(session_id) = self
+                    .preview
+                    .as_ref()
+                    .map(|preview| preview.session_id.clone())
+                else {
+                    return Action::None;
+                };
+                let Some(archived) = self.archived_state_for_session(&session_id) else {
+                    self.close_preview();
+                    self.status =
+                        Some("That session is no longer in the cached inventory.".to_owned());
+                    return Action::None;
+                };
+                self.close_preview();
+                Action::SetArchived {
+                    session_id,
+                    archived: !archived,
+                    attach: false,
+                }
+            }
+            KeyCode::Enter => {
+                let Some(session_id) = self
+                    .preview
+                    .as_ref()
+                    .map(|preview| preview.session_id.clone())
+                else {
+                    return Action::None;
+                };
+                self.action_for_session(&session_id)
+            }
+            _ => Action::None,
+        }
+    }
+
     fn selected_action(&mut self) -> Action {
-        let Some(session) = self.selected_session() else {
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return Action::None;
+        };
+        self.action_for_session(&session_id)
+    }
+
+    fn action_for_session(&mut self, session_id: &str) -> Action {
+        let Some((session, settled)) = self
+            .active
+            .iter()
+            .map(|session| (session, false))
+            .chain(self.settled.iter().map(|session| (session, true)))
+            .find(|(session, _)| session.id == session_id)
+        else {
+            self.close_preview();
+            self.status = Some("That session is no longer in the cached inventory.".to_owned());
             return Action::None;
         };
         if session.runtime == CodexRuntime::ExternalFrontend && self.fresh_ids.contains(&session.id)
         {
-            self.status = Some(
+            let message =
                 "Owned by an external frontend; close or release it before resuming here."
-                    .to_owned(),
-            );
+                    .to_owned();
+            if let Some(preview) = self.preview.as_mut() {
+                preview.notice = Some(message);
+            } else {
+                self.status = Some(message);
+            }
             return Action::None;
         }
 
-        if self.view == DashboardView::Settled {
+        if settled {
             Action::SetArchived {
                 session_id: session.id.clone(),
                 archived: false,
@@ -501,6 +624,79 @@ impl PickerApp {
         } else {
             Action::Attach(session.id.clone())
         }
+    }
+
+    fn archived_state_for_session(&self, session_id: &str) -> Option<bool> {
+        self.active
+            .iter()
+            .any(|session| session.id == session_id)
+            .then_some(false)
+            .or_else(|| {
+                self.settled
+                    .iter()
+                    .any(|session| session.id == session_id)
+                    .then_some(true)
+            })
+    }
+
+    fn start_preview(&mut self) {
+        let Some(session) = self.selected_session().cloned() else {
+            return;
+        };
+        self.preview_request_id = self.preview_request_id.wrapping_add(1);
+        let request_id = self.preview_request_id;
+        let fallback = cached_preview(&session);
+        self.status = None;
+        self.input_mode = InputMode::Preview;
+
+        let can_capture = self.fresh_ids.contains(&session.id)
+            && session.runtime == CodexRuntime::TmuxFrontend
+            && session.tmux.is_some();
+        let content = if can_capture {
+            PreviewContent::Loading
+        } else {
+            PreviewContent::Ready {
+                source: cached_preview_source(&session),
+                body: fallback.clone(),
+            }
+        };
+        self.preview = Some(SessionPreview {
+            request_id,
+            session_id: session.id.clone(),
+            title: session.title.clone(),
+            host: session.host.clone(),
+            scroll_from_bottom: 0,
+            notice: None,
+            content,
+        });
+
+        if let Some(binding) = session.tmux {
+            if !can_capture {
+                return;
+            }
+            let sender = self.refresh_tx.clone();
+            let host = session.host;
+            let session_id = session.id;
+            thread::spawn(move || {
+                let result = tmux::capture_pane(
+                    &host,
+                    &binding.session,
+                    &binding.pane,
+                    PREVIEW_CAPTURE_LINES,
+                )
+                .map_err(|error| error.to_string());
+                let _ = sender.send(RefreshEvent::Preview {
+                    request_id,
+                    session_id,
+                    result,
+                });
+            });
+        }
+    }
+
+    fn close_preview(&mut self) {
+        self.preview = None;
+        self.input_mode = InputMode::Browse;
     }
 
     fn archive_action(&self, attach: bool) -> Action {
@@ -786,6 +982,37 @@ impl PickerApp {
                 self.activity_pending.remove(&target);
                 if let Ok(observations) = observations {
                     self.apply_live_observations(&target, &observations)?;
+                }
+                return Ok(());
+            }
+            RefreshEvent::Preview {
+                request_id,
+                session_id,
+                result,
+            } => {
+                if let Some(preview) = self.preview.as_mut()
+                    && preview.request_id == request_id
+                    && preview.session_id == session_id
+                {
+                    let fallback = self
+                        .active
+                        .iter()
+                        .chain(&self.settled)
+                        .find(|session| session.id == session_id)
+                        .map(cached_preview)
+                        .unwrap_or_else(|| "No cached response is available.".to_owned());
+                    preview.content = match result {
+                        Ok(body) if !body.trim().is_empty() => PreviewContent::Ready {
+                            source: "live tmux pane",
+                            body,
+                        },
+                        Ok(_) => PreviewContent::Ready {
+                            source: "cached response",
+                            body: fallback,
+                        },
+                        Err(error) => PreviewContent::Failed { error, fallback },
+                    };
+                    preview.scroll_from_bottom = 0;
                 }
                 return Ok(());
             }
@@ -1316,6 +1543,7 @@ fn draw(frame: &mut Frame<'_>, app: &PickerApp) {
     match app.input_mode {
         InputMode::Hosts => draw_hosts(frame, app),
         InputMode::Help => draw_help(frame),
+        InputMode::Preview => draw_preview(frame, app),
         InputMode::Browse | InputMode::Search => {}
     }
 }
@@ -1760,6 +1988,23 @@ fn draw_footer(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
             Span::styled("?/enter/esc", Style::default().fg(Color::Cyan)),
             Span::raw(" close help"),
         ]),
+        InputMode::Preview => Line::from(vec![
+            Span::styled("enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" open  "),
+            Span::styled("a", Style::default().fg(Color::Cyan)),
+            Span::raw(
+                app.preview
+                    .as_ref()
+                    .and_then(|preview| app.archived_state_for_session(&preview.session_id))
+                    .map_or(" settle/restore  ", |archived| {
+                        if archived { " restore  " } else { " settle  " }
+                    }),
+            ),
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(" scroll  "),
+            Span::styled("esc", Style::default().fg(Color::Cyan)),
+            Span::raw(" close"),
+        ]),
     };
     frame.render_widget(
         Paragraph::new(content)
@@ -1776,6 +2021,7 @@ fn draw_help(frame: &mut Frame<'_>) {
         Line::from("  j/k or arrows   move"),
         Line::from("  g/G             first / last"),
         Line::from("  enter           attach / resume"),
+        Line::from("  p               preview pane / response"),
         Line::from("  tab             Active / Settled"),
         Line::from("  a               settle / restore"),
         Line::from("  /               search"),
@@ -1803,6 +2049,141 @@ fn draw_help(frame: &mut Frame<'_>) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn draw_preview(frame: &mut Frame<'_>, app: &PickerApp) {
+    let Some(preview) = app.preview.as_ref() else {
+        return;
+    };
+    let area = centered_rect(90, 88, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Session preview ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let (source, body, style) = match &preview.content {
+        PreviewContent::Loading => (
+            "capturing live tmux pane",
+            format!("{} Loading preview…", working_pulse().0),
+            Style::default().fg(Color::Cyan),
+        ),
+        PreviewContent::Ready { source, body } => (*source, body.clone(), Style::default()),
+        PreviewContent::Failed { error, fallback } => (
+            "cached response · live capture failed",
+            format!("{fallback}\n\nCapture error: {error}"),
+            Style::default(),
+        ),
+    };
+    let notice_height = u16::from(preview.notice.is_some()).saturating_mul(2);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(notice_height),
+        ])
+        .split(inner);
+    let title = truncate_with_ellipsis(&preview.title, usize::from(inner.width).saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                title,
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("{} · {source}", preview.host),
+                muted_style(),
+            )),
+        ]),
+        sections[0],
+    );
+
+    let wrapped = wrap_preview_body(&body, usize::from(sections[1].width).max(1));
+    let visible = preview_window(
+        &wrapped,
+        usize::from(sections[1].height).max(1),
+        preview.scroll_from_bottom,
+    );
+    frame.render_widget(
+        Paragraph::new(visible)
+            .style(style)
+            .wrap(Wrap { trim: false }),
+        sections[1],
+    );
+    if let Some(notice) = &preview.notice {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                notice.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .block(Block::default().borders(Borders::TOP)),
+            sections[2],
+        );
+    }
+}
+
+fn cached_preview(session: &CodexSession) -> String {
+    if session.last_message.trim().is_empty() {
+        format!(
+            "{}\n\nNo cached agent response is available.\n\n{} / {}",
+            session.title,
+            compact_home(&session.cwd),
+            session.host
+        )
+    } else {
+        format!(
+            "{}\n\n{}\n\n{} / {}",
+            session.title,
+            session.last_message,
+            compact_home(&session.cwd),
+            session.host
+        )
+    }
+}
+
+const fn cached_preview_source(session: &CodexSession) -> &'static str {
+    match session.runtime {
+        CodexRuntime::ExternalFrontend => "external frontend · cached response",
+        CodexRuntime::SharedBackend => "Rollcall backend · cached response",
+        CodexRuntime::TmuxFrontend | CodexRuntime::Resumable => "cached response",
+    }
+}
+
+fn wrap_preview_body(body: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for line in body.lines() {
+        if line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        let characters = line.chars().collect::<Vec<_>>();
+        wrapped.extend(
+            characters
+                .chunks(width)
+                .map(|chunk| chunk.iter().collect::<String>()),
+        );
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped
+}
+
+fn preview_window(lines: &[String], height: usize, scroll_from_bottom: usize) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let maximum_scroll = lines.len().saturating_sub(height);
+    let scroll = scroll_from_bottom.min(maximum_scroll);
+    let end = lines.len().saturating_sub(scroll);
+    let start = end.saturating_sub(height);
+    lines[start..end].join("\n")
 }
 
 fn draw_hosts(frame: &mut Frame<'_>, app: &PickerApp) {
@@ -1888,9 +2269,9 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        Action, DashboardRow, DashboardView, InputMode, PickerApp, deduplicate_discovery_targets,
-        format_age, normalize_host_filter, session_matches, session_needs_detail,
-        truncate_with_ellipsis,
+        Action, DashboardRow, DashboardView, InputMode, PickerApp, PreviewContent, RefreshEvent,
+        deduplicate_discovery_targets, format_age, normalize_host_filter, preview_window,
+        session_matches, session_needs_detail, truncate_with_ellipsis, wrap_preview_body,
     };
     use crate::{
         codex::{
@@ -2033,6 +2414,126 @@ mod tests {
                 attach: false,
             }
         );
+    }
+
+    #[test]
+    fn resumable_preview_uses_cached_response_without_starting_a_capture() {
+        let mut candidate = session("019f", "/fabric", "Cached thread");
+        candidate.runtime = CodexRuntime::Resumable;
+        candidate.tmux = None;
+        let mut app = app_with_sessions(vec![candidate], Vec::new());
+
+        app.start_preview();
+
+        assert_eq!(app.input_mode, InputMode::Preview);
+        let preview = app.preview.as_ref().expect("preview should open");
+        match &preview.content {
+            PreviewContent::Ready { source, body } => {
+                assert_eq!(*source, "cached response");
+                assert!(body.contains("The implementation is ready."));
+            }
+            content => panic!("expected cached preview, got {content:?}"),
+        }
+        assert!(matches!(
+            app.refresh_rx.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn preview_archive_action_uses_the_current_projection() {
+        let mut candidate = session("019f", "/fabric", "Moved thread");
+        candidate.runtime = CodexRuntime::Resumable;
+        candidate.tmux = None;
+        let mut app = app_with_sessions(vec![candidate], Vec::new());
+        app.start_preview();
+
+        let moved = app.active.remove(0);
+        app.settled.push(moved);
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Action::SetArchived {
+                session_id: "topo:codex:019f".to_owned(),
+                archived: false,
+                attach: false,
+            }
+        );
+        assert_eq!(app.input_mode, InputMode::Browse);
+        assert!(app.preview.is_none());
+    }
+
+    #[test]
+    fn preview_enter_keeps_an_external_frontend_open_with_a_notice() {
+        let mut candidate = session("019f", "/fabric", "External thread");
+        candidate.runtime = CodexRuntime::ExternalFrontend;
+        candidate.tmux = None;
+        let mut app = app_with_sessions(vec![candidate], Vec::new());
+        app.start_preview();
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::None
+        );
+        assert_eq!(app.input_mode, InputMode::Preview);
+        assert!(
+            app.preview
+                .as_ref()
+                .and_then(|preview| preview.notice.as_deref())
+                .is_some_and(|notice| notice.contains("close or release"))
+        );
+    }
+
+    #[test]
+    fn preview_refresh_ignores_stale_results_and_accepts_the_matching_capture() {
+        let mut candidate = session("019f", "/fabric", "Preview refresh");
+        candidate.runtime = CodexRuntime::Resumable;
+        candidate.tmux = None;
+        let mut app = app_with_sessions(vec![candidate], Vec::new());
+        app.start_preview();
+        let request_id = app
+            .preview
+            .as_ref()
+            .expect("preview should open")
+            .request_id;
+
+        app.apply_refresh_event(RefreshEvent::Preview {
+            request_id: request_id.wrapping_add(1),
+            session_id: "topo:codex:019f".to_owned(),
+            result: Ok("stale capture".to_owned()),
+        })
+        .expect("stale result should be harmless");
+        assert!(matches!(
+            app.preview.as_ref().map(|preview| &preview.content),
+            Some(PreviewContent::Ready {
+                source: "cached response",
+                ..
+            })
+        ));
+
+        app.apply_refresh_event(RefreshEvent::Preview {
+            request_id,
+            session_id: "topo:codex:019f".to_owned(),
+            result: Ok("live pane output".to_owned()),
+        })
+        .expect("matching result should apply");
+        assert!(matches!(
+            app.preview.as_ref().map(|preview| &preview.content),
+            Some(PreviewContent::Ready {
+                source: "live tmux pane",
+                body,
+            }) if body == "live pane output"
+        ));
+    }
+
+    #[test]
+    fn preview_window_starts_at_the_newest_lines_and_scrolls_toward_history() {
+        let lines = wrap_preview_body("one\ntwo\nthree\nfour\nfive", 20);
+
+        assert_eq!(preview_window(&lines, 3, 0), "three\nfour\nfive");
+        assert_eq!(preview_window(&lines, 3, 1), "two\nthree\nfour");
+        assert_eq!(preview_window(&lines, 3, usize::MAX), "one\ntwo\nthree");
+        assert_eq!(wrap_preview_body("abcdefgh", 3), vec!["abc", "def", "gh"]);
     }
 
     #[test]
@@ -2244,6 +2745,8 @@ mod tests {
             limit: 50,
             status: None,
             notice: None,
+            preview_request_id: 0,
+            preview: None,
         };
         app.rebuild_rows();
         app
@@ -2251,7 +2754,7 @@ mod tests {
 
     use std::{
         collections::{BTreeMap, BTreeSet},
-        sync::mpsc,
+        sync::mpsc::{self, TryRecvError},
         time::{Instant, SystemTime, UNIX_EPOCH},
     };
 
