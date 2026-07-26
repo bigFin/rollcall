@@ -3,6 +3,7 @@ pub mod codex;
 pub mod codex_runtime;
 pub mod domain;
 pub mod hosts;
+mod notify;
 pub mod picker;
 mod reconnect;
 pub mod shell;

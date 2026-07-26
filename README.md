@@ -36,12 +36,13 @@ first; last-agent messages fill in afterward without blocking the interface.
 Active and Settled views, reversible archive state, status indicators, search,
 host filtering, live lifecycle polling, adaptive reconnection, seven-day
 automatic settling, offline cached sessions, and on-demand session previews are
-implemented.
+implemented. Meaningful lifecycle transitions also create persistent unread
+attention and local notifications while Rollcall is running.
 
 Codex inventory and resumed TUIs now converge on one lazily started app-server
-per host and `CODEX_HOME`. Additional coding-agent adapters, persistent
-between-picker notifications, configurable stale-after rules, and the optional
-local broker remain ahead.
+per host and `CODEX_HOME`. Additional coding-agent adapters, background
+observation while every Rollcall process is closed, configurable stale-after
+rules, and the optional local broker remain ahead.
 
 ## Product Boundary
 
@@ -96,6 +97,7 @@ p              preview the live tmux pane or cached response
 h              select an SSH host
 tab            switch Active/Settled views
 a              settle or restore the selected session
+x              mark the selected session read
 i              show or hide selected-session details
 r              refresh or retry all hosts
 ?              open the key and status legend
@@ -112,6 +114,44 @@ captures only when opened rather than polling pane contents continuously.
 Within it, `Enter` opens the session, `a` settles or restores it, `j/k` scrolls,
 and `Esc` closes it. Press `i` at normal terminal heights to show a compact
 selected-session strip without making every dashboard row taller by default.
+
+## Attention and Notifications
+
+Rollcall records meaningful session transitions rather than treating every
+poll as an event:
+
+- working, approval, or input to completed;
+- a new approval or input request;
+- a transition into failure.
+
+Those transitions mark the session unread, move its group toward the top of the
+picker, and add a yellow dot to its row. Unread sessions are not automatically
+settled. Press `x` to mark one read; attaching to or manually settling it also
+acknowledges the notification.
+
+While Rollcall is running, transitions and host recovery emit a terminal bell
+by default. Set `ROLLCALL_NOTIFY_COMMAND` to run a local notification command
+instead. The hook receives data through environment variables, so session text
+does not need to be interpolated into shell source:
+
+```console
+export ROLLCALL_NOTIFY_COMMAND='notify-send "$ROLLCALL_NOTIFICATION_TITLE" "$ROLLCALL_NOTIFICATION_BODY"'
+```
+
+On Android with Termux:API:
+
+```console
+export ROLLCALL_NOTIFY_COMMAND='termux-notification --title "$ROLLCALL_NOTIFICATION_TITLE" --content "$ROLLCALL_NOTIFICATION_BODY"'
+```
+
+The hook receives `ROLLCALL_NOTIFICATION_KIND`,
+`ROLLCALL_NOTIFICATION_TITLE`, `ROLLCALL_NOTIFICATION_BODY`,
+`ROLLCALL_NOTIFICATION_HOST`, and `ROLLCALL_NOTIFICATION_SESSION_ID`. Set the
+command to an empty value to disable both the hook and default bell.
+
+There is still no background daemon. If a turn finishes while Rollcall is
+closed, it becomes unread the next time a picker refresh can compare the new
+native state with its previous snapshot.
 
 From an ordinary shell inside tmux:
 
@@ -131,8 +171,9 @@ timestamps, cached message, and resume path. Completed or otherwise idle
 sessions with no native interaction for seven days are settled automatically.
 A manually restored stale session stays active until it receives new native
 activity, and new activity automatically wakes a session that Rollcall settled
-for staleness. Manual archives stay settled. A configurable threshold and a
-full-text index remain planned.
+for staleness. Unread sessions remain Active until acknowledged, and manual
+archives stay settled. A configurable threshold and a full-text index remain
+planned.
 
 `rollcall history` reads the local SQLite cache without connecting to any host.
 It combines Active and Settled sessions in native-interaction chronology and

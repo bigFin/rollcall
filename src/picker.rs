@@ -25,8 +25,9 @@ use ratatui::{
 use crate::{
     codex::{self, CodexActivity, CodexError, CodexRuntime, CodexSession},
     hosts::{self, HostDiscoveryError, SshHost},
+    notify,
     reconnect::{HostPhase, HostReconnectState, classify_failure},
-    store::{DEFAULT_STALE_AFTER_SECONDS, Store, StoreError},
+    store::{DEFAULT_STALE_AFTER_SECONDS, SessionTransition, Store, StoreError},
     tmux,
 };
 
@@ -87,6 +88,7 @@ pub fn run(initial_host: &str, limit: usize) -> Result<(), PickerError> {
     let selection = run_terminal(&mut app)?;
     if let Some(session_id) = selection {
         codex::attach(&session_id)?;
+        app.acknowledge_session(&session_id, false)?;
     }
     Ok(())
 }
@@ -182,6 +184,9 @@ fn event_loop(
             Action::Refresh => {
                 app.start_refresh();
             }
+            Action::Acknowledge(session_id) => {
+                app.acknowledge_session(&session_id, true)?;
+            }
             Action::SetArchived {
                 session_id,
                 archived,
@@ -237,6 +242,7 @@ enum Action {
     None,
     Quit,
     Attach(String),
+    Acknowledge(String),
     Refresh,
     SetArchived {
         session_id: String,
@@ -316,6 +322,7 @@ struct PickerApp {
     enriching_hosts: BTreeSet<String>,
     host_errors: BTreeMap<String, String>,
     fresh_ids: HashSet<String>,
+    unread_ids: HashSet<String>,
     refresh_generation: u64,
     refresh_tx: Sender<RefreshEvent>,
     refresh_rx: Receiver<RefreshEvent>,
@@ -361,6 +368,7 @@ impl PickerApp {
             enriching_hosts: BTreeSet::new(),
             host_errors: BTreeMap::new(),
             fresh_ids: HashSet::new(),
+            unread_ids: HashSet::new(),
             refresh_generation: 0,
             refresh_tx,
             refresh_rx,
@@ -425,6 +433,7 @@ impl PickerApp {
             }
             KeyCode::Char('r') => Action::Refresh,
             KeyCode::Char('a') => self.archive_action(false),
+            KeyCode::Char('x') => self.acknowledge_action(),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.status = None;
                 self.select_next();
@@ -569,6 +578,11 @@ impl PickerApp {
                     attach: false,
                 }
             }
+            KeyCode::Char('x') => self
+                .preview
+                .as_ref()
+                .map(|preview| Action::Acknowledge(preview.session_id.clone()))
+                .unwrap_or(Action::None),
             KeyCode::Enter => {
                 let Some(session_id) = self
                     .preview
@@ -706,6 +720,12 @@ impl PickerApp {
                 archived: self.view == DashboardView::Active,
                 attach,
             })
+    }
+
+    fn acknowledge_action(&self) -> Action {
+        self.selected_session()
+            .map(|session| Action::Acknowledge(session.id.clone()))
+            .unwrap_or(Action::None)
     }
 
     fn toggle_view(&mut self) {
@@ -927,14 +947,16 @@ impl PickerApp {
                 self.preserve_cached_messages(&mut sessions);
                 self.record_fresh_sessions(&sessions)?;
                 if recovered {
+                    let observed_host = codex::observed_host(&target);
                     self.notice = Some((
                         format!(
                             "{} is back online · restored {} sessions",
-                            codex::observed_host(&target),
+                            observed_host,
                             sessions.len()
                         ),
                         Instant::now(),
                     ));
+                    notify::host_recovered(&observed_host, sessions.len());
                 }
             }
             RefreshEvent::Detailed {
@@ -1070,7 +1092,7 @@ impl PickerApp {
         }
 
         if !updates.is_empty() {
-            self.store.record(&updates)?;
+            self.record_sessions(&updates)?;
             self.rebuild_rows_selecting(selected_session_id.as_deref());
         }
         Ok(())
@@ -1079,8 +1101,40 @@ impl PickerApp {
     fn record_fresh_sessions(&mut self, sessions: &[CodexSession]) -> Result<(), PickerError> {
         self.fresh_ids
             .extend(sessions.iter().map(|session| session.id.clone()));
-        self.store.record(sessions)?;
+        self.record_sessions(sessions)?;
         Ok(())
+    }
+
+    fn record_sessions(&mut self, sessions: &[CodexSession]) -> Result<(), PickerError> {
+        let transitions = self.store.record(sessions)?;
+        self.handle_transitions(&transitions);
+        Ok(())
+    }
+
+    fn handle_transitions(&mut self, transitions: &[SessionTransition]) {
+        if transitions.is_empty() {
+            return;
+        }
+        for transition in transitions {
+            self.unread_ids.insert(transition.session_id.clone());
+            notify::session_transition(transition);
+        }
+        self.notice = if let [transition] = transitions {
+            Some((
+                format!(
+                    "{} · {} on {}",
+                    transition.kind.as_str(),
+                    transition.title,
+                    transition.host
+                ),
+                Instant::now(),
+            ))
+        } else {
+            Some((
+                format!("{} sessions need attention", transitions.len()),
+                Instant::now(),
+            ))
+        };
     }
 
     fn preserve_cached_messages(&self, sessions: &mut [CodexSession]) {
@@ -1201,10 +1255,40 @@ impl PickerApp {
         self.store.auto_settle_stale(DEFAULT_STALE_AFTER_SECONDS)?;
         self.active = self.store.load(false)?;
         self.settled = self.store.load(true)?;
+        self.unread_ids = self.store.unread_session_ids()?.into_iter().collect();
         for session in self.active.iter_mut().chain(self.settled.iter_mut()) {
             if !self.fresh_ids.contains(&session.id) {
                 session.runtime = CodexRuntime::Resumable;
                 session.tmux = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn acknowledge_session(
+        &mut self,
+        session_id: &str,
+        show_status: bool,
+    ) -> Result<(), PickerError> {
+        let title = self
+            .active
+            .iter()
+            .chain(&self.settled)
+            .find(|session| session.id == session_id)
+            .map_or_else(|| session_id.to_owned(), |session| session.title.clone());
+        let changed = self.store.acknowledge(session_id)?;
+        self.unread_ids.remove(session_id);
+        self.rebuild_rows_selecting(Some(session_id));
+        if show_status {
+            let message = if changed {
+                format!("Marked {title} read.")
+            } else {
+                format!("{title} was already read.")
+            };
+            if let Some(preview) = self.preview.as_mut() {
+                preview.notice = Some(message);
+            } else {
+                self.status = Some(message);
             }
         }
         Ok(())
@@ -1281,6 +1365,14 @@ impl PickerApp {
 
         let mut groups = groups.into_iter().collect::<Vec<_>>();
         groups.sort_by(|left, right| {
+            let left_unread = left
+                .1
+                .iter()
+                .any(|index| self.unread_ids.contains(&sessions[*index].id));
+            let right_unread = right
+                .1
+                .iter()
+                .any(|index| self.unread_ids.contains(&sessions[*index].id));
             let left_priority = left
                 .1
                 .iter()
@@ -1305,8 +1397,9 @@ impl PickerApp {
                 .map(|index| sessions[*index].last_interaction_unix_seconds)
                 .max()
                 .unwrap_or_default();
-            left_priority
-                .cmp(&right_priority)
+            right_unread
+                .cmp(&left_unread)
+                .then_with(|| left_priority.cmp(&right_priority))
                 .then_with(|| right_recency.cmp(&left_recency))
                 .then(left.0.cmp(&right.0))
         });
@@ -1315,6 +1408,7 @@ impl PickerApp {
         for ((cwd, host), mut indices) in groups {
             indices.sort_by_key(|index| {
                 (
+                    !self.unread_ids.contains(&sessions[*index].id),
                     activity_priority(sessions[*index].activity),
                     std::cmp::Reverse(sessions[*index].last_interaction_unix_seconds),
                 )
@@ -1605,6 +1699,17 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
             },
         ),
     ]);
+    if !app.unread_ids.is_empty() {
+        subtitle.extend([
+            Span::raw(" · "),
+            Span::styled(
+                format!("{} unread", app.unread_ids.len()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+    }
     if app.input_mode == InputMode::Search || !app.query.is_empty() {
         subtitle.extend([
             Span::raw("    "),
@@ -1663,6 +1768,7 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
             DashboardRow::Session(index) => session_item(
                 &sessions[*index],
                 app.fresh_ids.contains(&sessions[*index].id),
+                app.unread_ids.contains(&sessions[*index].id),
                 area.width,
             ),
         })
@@ -1749,7 +1855,12 @@ fn compact_home(path: &str) -> String {
     }
 }
 
-fn session_item(session: &CodexSession, fresh: bool, width: u16) -> ListItem<'static> {
+fn session_item(
+    session: &CodexSession,
+    fresh: bool,
+    unread: bool,
+    width: u16,
+) -> ListItem<'static> {
     let (marker, marker_style, _) = if fresh {
         activity_style(session.activity)
     } else {
@@ -1772,7 +1883,16 @@ fn session_item(session: &CodexSession, fresh: bool, width: u16) -> ListItem<'st
         text_width
     };
     let mut spans = vec![
-        Span::raw("  "),
+        Span::styled(
+            if unread { "• " } else { "  " },
+            if unread {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        ),
         Span::styled(format!("{marker} "), marker_style),
     ];
     if !status_label.is_empty() {
@@ -1867,12 +1987,17 @@ fn draw_selected_detail(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
         &session.last_message
     };
     let metadata = format!(
-        "{} / {} · {} · {} · {}",
+        "{} / {} · {} · {} · {}{}",
         compact_home(&session.cwd),
         session.host,
         format_age(session.last_interaction_unix_seconds),
         runtime,
-        session.native_session_id
+        session.native_session_id,
+        if app.unread_ids.contains(&session.id) {
+            " · unread"
+        } else {
+            ""
+        }
     );
     let lines = vec![
         Line::from(vec![
@@ -1960,6 +2085,8 @@ fn draw_footer(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                     } else {
                         " settle  "
                     }),
+                    Span::styled("x", Style::default().fg(Color::Cyan)),
+                    Span::raw(" read  "),
                     Span::styled("tab", Style::default().fg(Color::Cyan)),
                     Span::raw(" view  "),
                     Span::styled("/", Style::default().fg(Color::Cyan)),
@@ -2000,6 +2127,8 @@ fn draw_footer(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                         if archived { " restore  " } else { " settle  " }
                     }),
             ),
+            Span::styled("x", Style::default().fg(Color::Cyan)),
+            Span::raw(" read  "),
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(" scroll  "),
             Span::styled("esc", Style::default().fg(Color::Cyan)),
@@ -2024,6 +2153,7 @@ fn draw_help(frame: &mut Frame<'_>) {
         Line::from("  p               preview pane / response"),
         Line::from("  tab             Active / Settled"),
         Line::from("  a               settle / restore"),
+        Line::from("  x               mark selected session read"),
         Line::from("  /               search"),
         Line::from("  h               host filter"),
         Line::from("  i               session details"),
@@ -2417,6 +2547,17 @@ mod tests {
     }
 
     #[test]
+    fn acknowledge_key_targets_the_selected_session() {
+        let mut app = app_with_sessions(vec![session("019f", "/fabric", "Read me")], Vec::new());
+        app.unread_ids.insert("topo:codex:019f".to_owned());
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Action::Acknowledge("topo:codex:019f".to_owned())
+        );
+    }
+
+    #[test]
     fn resumable_preview_uses_cached_response_without_starting_a_capture() {
         let mut candidate = session("019f", "/fabric", "Cached thread");
         candidate.runtime = CodexRuntime::Resumable;
@@ -2628,6 +2769,7 @@ mod tests {
         )
         .expect("completion observation should apply");
         assert_eq!(app.active[0].activity, CodexActivity::Completed);
+        assert!(app.unread_ids.contains(&app.active[0].id));
     }
 
     #[test]
@@ -2642,6 +2784,21 @@ mod tests {
         assert_eq!(
             app.selected_session().map(|session| session.title.as_str()),
             Some("Working")
+        );
+    }
+
+    #[test]
+    fn unread_completed_sessions_sort_ahead_of_working_sessions() {
+        let completed = session("019f", "/completed", "Unread completion");
+        let mut working = session("019e", "/working", "Working");
+        working.activity = CodexActivity::Working;
+        let mut app = app_with_sessions(vec![working, completed], Vec::new());
+        app.unread_ids.insert("topo:codex:019f".to_owned());
+        app.rebuild_rows_selecting(None);
+
+        assert_eq!(
+            app.selected_session().map(|session| session.title.as_str()),
+            Some("Unread completion")
         );
     }
 
@@ -2732,6 +2889,7 @@ mod tests {
             enriching_hosts: BTreeSet::new(),
             host_errors: BTreeMap::new(),
             fresh_ids,
+            unread_ids: HashSet::new(),
             refresh_generation: 0,
             refresh_tx,
             refresh_rx,
@@ -2753,7 +2911,7 @@ mod tests {
     }
 
     use std::{
-        collections::{BTreeMap, BTreeSet},
+        collections::{BTreeMap, BTreeSet, HashSet},
         sync::mpsc::{self, TryRecvError},
         time::{Instant, SystemTime, UNIX_EPOCH},
     };

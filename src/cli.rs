@@ -328,7 +328,7 @@ fn history_matches(entry: &HistoryEntry, host: Option<&str>, search: Option<&str
         return true;
     };
     let corpus = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         entry.session.title,
         entry.session.last_message,
         entry.session.cwd,
@@ -338,6 +338,7 @@ fn history_matches(entry: &HistoryEntry, host: Option<&str>, search: Option<&str
         activity_label(entry.session.activity),
         runtime_label(entry.session.runtime),
         if entry.settled { "settled" } else { "active" },
+        if entry.unread { "unread" } else { "read" },
         entry.settle_reason.as_deref().unwrap_or_default(),
     )
     .to_lowercase();
@@ -352,6 +353,7 @@ fn attach(session: &str) -> Result<(), CliError> {
     } else {
         tmux::attach(session)?;
     }
+    Store::open()?.acknowledge(session)?;
     Ok(())
 }
 
@@ -796,6 +798,9 @@ mod tests {
                 tmux: None,
             },
             settled: true,
+            unread: false,
+            notification_kind: None,
+            notification_at_unix_seconds: None,
             settled_at_unix_seconds: Some(200),
             settle_reason: Some("manual".to_owned()),
             last_seen_unix_seconds: 200,

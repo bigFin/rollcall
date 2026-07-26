@@ -4,10 +4,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, params};
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
-use crate::codex::CodexSession;
+use crate::codex::{CodexActivity, CodexSession};
 
 pub const DEFAULT_STALE_AFTER_SECONDS: u64 = 7 * 24 * 60 * 60;
 
@@ -54,11 +54,46 @@ pub struct Store {
     connection: Connection,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionTransitionKind {
+    Completed,
+    Approval,
+    Input,
+    Failed,
+}
+
+impl SessionTransitionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Approval => "approval",
+            Self::Input => "input",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTransition {
+    pub session_id: String,
+    pub title: String,
+    pub host: String,
+    pub kind: SessionTransitionKind,
+    pub observed_at_unix_seconds: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryEntry {
     pub session: CodexSession,
     pub settled: bool,
+    pub unread: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_at_unix_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_at_unix_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,7 +135,10 @@ impl Store {
                 last_interaction INTEGER NOT NULL DEFAULT 0,
                 archive_reason TEXT,
                 archive_basis_interaction INTEGER,
-                active_override_interaction INTEGER
+                active_override_interaction INTEGER,
+                notification_unread INTEGER NOT NULL DEFAULT 0,
+                notification_kind TEXT,
+                notification_at INTEGER
             );
 
             CREATE INDEX IF NOT EXISTS sessions_archived_last_seen
@@ -115,14 +153,32 @@ impl Store {
         ensure_column(&connection, "archive_reason", "TEXT")?;
         ensure_column(&connection, "archive_basis_interaction", "INTEGER")?;
         ensure_column(&connection, "active_override_interaction", "INTEGER")?;
+        ensure_column(
+            &connection,
+            "notification_unread",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(&connection, "notification_kind", "TEXT")?;
+        ensure_column(&connection, "notification_at", "INTEGER")?;
         backfill_last_interaction(&connection)?;
         Ok(Self { connection })
     }
 
-    pub fn record(&mut self, sessions: &[CodexSession]) -> Result<(), StoreError> {
+    pub fn record(
+        &mut self,
+        sessions: &[CodexSession],
+    ) -> Result<Vec<SessionTransition>, StoreError> {
         let transaction = self.connection.transaction()?;
         let last_seen = now_unix_seconds();
+        let mut transitions = Vec::new();
         {
+            let mut previous_statement = transaction.prepare(
+                "
+                SELECT snapshot, archived, archive_reason
+                FROM sessions
+                WHERE session_id = ?1
+                ",
+            )?;
             let mut statement = transaction.prepare(
                 "
                 INSERT INTO sessions (
@@ -130,9 +186,12 @@ impl Store {
                     snapshot,
                     archived,
                     last_seen,
-                    last_interaction
+                    last_interaction,
+                    notification_unread,
+                    notification_kind,
+                    notification_at
                 )
-                VALUES (?1, ?2, 0, ?3, ?4)
+                VALUES (?1, ?2, 0, ?3, ?4, 0, NULL, NULL)
                 ON CONFLICT(session_id) DO UPDATE SET
                     snapshot = excluded.snapshot,
                     last_seen = excluded.last_seen,
@@ -173,20 +232,62 @@ impl Store {
                             )
                         THEN NULL
                         ELSE sessions.active_override_interaction
+                    END,
+                    notification_unread = CASE
+                        WHEN ?5 IS NOT NULL THEN 1
+                        ELSE sessions.notification_unread
+                    END,
+                    notification_kind = CASE
+                        WHEN ?5 IS NOT NULL THEN ?5
+                        ELSE sessions.notification_kind
+                    END,
+                    notification_at = CASE
+                        WHEN ?5 IS NOT NULL THEN ?3
+                        ELSE sessions.notification_at
                     END
                 ",
             )?;
             for session in sessions {
+                let previous = previous_statement
+                    .query_row([&session.id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, bool>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    })
+                    .optional()?
+                    .map(|(snapshot, archived, archive_reason)| {
+                        serde_json::from_str::<CodexSession>(&snapshot)
+                            .map(|session| (session, archived, archive_reason))
+                    })
+                    .transpose()?;
+                let transition = previous
+                    .as_ref()
+                    .filter(|(_, archived, archive_reason)| {
+                        !archived || archive_reason.as_deref() == Some("stale")
+                    })
+                    .and_then(|(previous, _, _)| attention_transition(previous, session));
                 statement.execute(params![
                     session.id,
                     serde_json::to_string(session)?,
                     last_seen,
-                    i64::try_from(session.last_interaction_unix_seconds).unwrap_or(i64::MAX)
+                    i64::try_from(session.last_interaction_unix_seconds).unwrap_or(i64::MAX),
+                    transition.map(SessionTransitionKind::as_str),
                 ])?;
+                if let Some(kind) = transition {
+                    transitions.push(SessionTransition {
+                        session_id: session.id.clone(),
+                        title: session.title.clone(),
+                        host: session.host.clone(),
+                        kind,
+                        observed_at_unix_seconds: nonnegative_u64(last_seen).unwrap_or_default(),
+                    });
+                }
             }
         }
         transaction.commit()?;
-        Ok(())
+        Ok(transitions)
     }
 
     pub fn load(&self, archived: bool) -> Result<Vec<CodexSession>, StoreError> {
@@ -210,7 +311,15 @@ impl Store {
     pub fn load_history(&self) -> Result<Vec<HistoryEntry>, StoreError> {
         let mut statement = self.connection.prepare(
             "
-            SELECT snapshot, archived, archived_at, archive_reason, last_seen
+            SELECT
+                snapshot,
+                archived,
+                notification_unread,
+                notification_kind,
+                notification_at,
+                archived_at,
+                archive_reason,
+                last_seen
             FROM sessions
             ORDER BY last_interaction DESC, last_seen DESC
             ",
@@ -220,19 +329,34 @@ impl Store {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, bool>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, bool>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         rows.into_iter()
             .map(
-                |(snapshot, settled, settled_at, settle_reason, last_seen)| {
+                |(
+                    snapshot,
+                    settled,
+                    unread,
+                    notification_kind,
+                    notification_at,
+                    settled_at,
+                    settle_reason,
+                    last_seen,
+                )| {
                     Ok(HistoryEntry {
                         session: serde_json::from_str(&snapshot)?,
                         settled,
+                        unread,
+                        notification_kind,
+                        notification_at_unix_seconds: notification_at.and_then(nonnegative_u64),
                         settled_at_unix_seconds: settled_at.and_then(nonnegative_u64),
                         settle_reason,
                         last_seen_unix_seconds: nonnegative_u64(last_seen).unwrap_or_default(),
@@ -253,6 +377,10 @@ impl Store {
                 active_override_interaction = CASE
                     WHEN ?2 THEN NULL
                     ELSE last_interaction
+                END,
+                notification_unread = CASE
+                    WHEN ?2 THEN 0
+                    ELSE notification_unread
                 END
             WHERE session_id = ?1
             ",
@@ -262,6 +390,32 @@ impl Store {
             return Err(StoreError::Sql(rusqlite::Error::QueryReturnedNoRows));
         }
         Ok(())
+    }
+
+    pub fn unread_session_ids(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT session_id
+            FROM sessions
+            WHERE notification_unread = 1
+            ",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn acknowledge(&self, session_id: &str) -> Result<bool, StoreError> {
+        Ok(self.connection.execute(
+            "
+            UPDATE sessions
+            SET notification_unread = 0
+            WHERE session_id = ?1
+                AND notification_unread = 1
+            ",
+            [session_id],
+        )? > 0)
     }
 
     pub fn auto_settle_stale(&self, stale_after_seconds: u64) -> Result<usize, StoreError> {
@@ -280,6 +434,7 @@ impl Store {
             SELECT session_id, snapshot, last_interaction
             FROM sessions
             WHERE archived = 0
+                AND notification_unread = 0
                 AND last_interaction <= ?1
                 AND (
                     active_override_interaction IS NULL
@@ -313,6 +468,7 @@ impl Store {
                     archive_basis_interaction = last_interaction
                 WHERE session_id = ?1
                     AND archived = 0
+                    AND notification_unread = 0
                     AND last_interaction = ?3
                     AND (
                         active_override_interaction IS NULL
@@ -323,6 +479,31 @@ impl Store {
             )?;
         }
         Ok(settled)
+    }
+}
+
+fn attention_transition(
+    previous: &CodexSession,
+    current: &CodexSession,
+) -> Option<SessionTransitionKind> {
+    if previous.activity == current.activity {
+        return None;
+    }
+    match current.activity {
+        CodexActivity::Completed
+            if matches!(
+                previous.activity,
+                CodexActivity::Working
+                    | CodexActivity::WaitingApproval
+                    | CodexActivity::WaitingInput
+            ) =>
+        {
+            Some(SessionTransitionKind::Completed)
+        }
+        CodexActivity::WaitingApproval => Some(SessionTransitionKind::Approval),
+        CodexActivity::WaitingInput => Some(SessionTransitionKind::Input),
+        CodexActivity::Failed => Some(SessionTransitionKind::Failed),
+        CodexActivity::Working | CodexActivity::Completed | CodexActivity::Unknown => None,
     }
 }
 
@@ -401,7 +582,7 @@ mod tests {
     use rusqlite::{Connection, params};
     use tempfile::tempdir;
 
-    use super::Store;
+    use super::{SessionTransitionKind, Store, attention_transition};
     use crate::codex::{CodexActivity, CodexRuntime, CodexSession};
 
     fn session(title: &str) -> CodexSession {
@@ -467,6 +648,182 @@ mod tests {
 
         assert_eq!(store.load(false).expect("active view should load").len(), 1);
         assert!(store.load(true).expect("archive should load").is_empty());
+    }
+
+    #[test]
+    fn working_to_completed_creates_one_persisted_unread_transition() {
+        let mut store = Store::open_memory().expect("store should open");
+        let mut candidate = session("turn");
+        candidate.activity = CodexActivity::Working;
+        assert!(
+            store
+                .record(&[candidate.clone()])
+                .expect("initial snapshot should save")
+                .is_empty()
+        );
+
+        candidate.activity = CodexActivity::Completed;
+        let transitions = store
+            .record(&[candidate.clone()])
+            .expect("completion should save");
+
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].kind, SessionTransitionKind::Completed);
+        assert_eq!(
+            store
+                .unread_session_ids()
+                .expect("unread state should load"),
+            [candidate.id.clone()]
+        );
+        assert!(
+            store
+                .record(&[candidate.clone()])
+                .expect("unchanged completion should save")
+                .is_empty()
+        );
+        assert!(
+            store
+                .acknowledge(&candidate.id)
+                .expect("attention should acknowledge")
+        );
+        assert!(
+            store
+                .unread_session_ids()
+                .expect("acknowledged state should load")
+                .is_empty()
+        );
+        assert!(
+            !store
+                .acknowledge(&candidate.id)
+                .expect("repeat acknowledgement should be harmless")
+        );
+    }
+
+    #[test]
+    fn attention_transitions_cover_approval_input_failure_and_completion() {
+        let mut previous = session("previous");
+        previous.activity = CodexActivity::Working;
+        let mut current = previous.clone();
+
+        current.activity = CodexActivity::WaitingApproval;
+        assert_eq!(
+            attention_transition(&previous, &current),
+            Some(SessionTransitionKind::Approval)
+        );
+        previous.activity = CodexActivity::WaitingApproval;
+        current.activity = CodexActivity::WaitingInput;
+        assert_eq!(
+            attention_transition(&previous, &current),
+            Some(SessionTransitionKind::Input)
+        );
+        previous.activity = CodexActivity::WaitingInput;
+        current.activity = CodexActivity::Failed;
+        assert_eq!(
+            attention_transition(&previous, &current),
+            Some(SessionTransitionKind::Failed)
+        );
+        previous.activity = CodexActivity::WaitingApproval;
+        current.activity = CodexActivity::Completed;
+        assert_eq!(
+            attention_transition(&previous, &current),
+            Some(SessionTransitionKind::Completed)
+        );
+    }
+
+    #[test]
+    fn unread_completed_sessions_do_not_auto_settle_until_acknowledged() {
+        let mut store = Store::open_memory().expect("store should open");
+        let mut candidate = session("attention");
+        candidate.activity = CodexActivity::Working;
+        candidate.last_interaction_unix_seconds = 100;
+        store
+            .record(&[candidate.clone()])
+            .expect("working snapshot should save");
+        candidate.activity = CodexActivity::Completed;
+        store
+            .record(&[candidate.clone()])
+            .expect("completion should save");
+
+        assert_eq!(
+            store
+                .auto_settle_stale_at(1_000_000, 60)
+                .expect("unread attention should remain active"),
+            0
+        );
+        store
+            .acknowledge(&candidate.id)
+            .expect("completion should acknowledge");
+        assert_eq!(
+            store
+                .auto_settle_stale_at(1_000_000, 60)
+                .expect("read stale session should settle"),
+            1
+        );
+    }
+
+    #[test]
+    fn manually_archived_sessions_do_not_emit_new_attention() {
+        let mut store = Store::open_memory().expect("store should open");
+        let mut candidate = session("archived");
+        candidate.activity = CodexActivity::Working;
+        store
+            .record(&[candidate.clone()])
+            .expect("working snapshot should save");
+        store
+            .set_archived(&candidate.id, true)
+            .expect("session should archive");
+        candidate.activity = CodexActivity::Completed;
+
+        assert!(
+            store
+                .record(&[candidate])
+                .expect("archived completion should save")
+                .is_empty()
+        );
+        assert!(
+            store
+                .unread_session_ids()
+                .expect("unread state should load")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn auto_settled_sessions_wake_and_emit_new_attention() {
+        let mut store = Store::open_memory().expect("store should open");
+        let mut candidate = session("stale");
+        candidate.activity = CodexActivity::Completed;
+        candidate.last_interaction_unix_seconds = 100;
+        store
+            .record(&[candidate.clone()])
+            .expect("completed snapshot should save");
+        assert_eq!(
+            store
+                .auto_settle_stale_at(1_000_000, 60)
+                .expect("stale session should settle"),
+            1
+        );
+
+        candidate.activity = CodexActivity::WaitingInput;
+        candidate.last_interaction_unix_seconds = 101;
+        let transitions = store
+            .record(&[candidate.clone()])
+            .expect("new attention should save");
+
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].kind, SessionTransitionKind::Input);
+        assert_eq!(
+            store
+                .load(false)
+                .expect("new activity should wake the session"),
+            [candidate.clone()]
+        );
+        assert_eq!(
+            store
+                .unread_session_ids()
+                .expect("new attention should be unread"),
+            [candidate.id]
+        );
     }
 
     #[test]

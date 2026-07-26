@@ -15,6 +15,10 @@ The current picker needs no Rollcall daemon. It loads its SQLite materialized
 view, starts short-lived background probes, and keeps refreshing while the
 picker is open. Codex itself has one lazily started app-server per host and
 `CODEX_HOME`; Rollcall contains it in tmux and communicates over a Unix socket.
+A meaningful lifecycle transition updates persistent unread state and emits a
+best-effort local notification while the picker is running. The default
+notification is a terminal bell; an optional command hook supports desktop and
+Termux notification systems without adding a required dependency.
 A later observation layer may add a lazily started local broker for
 notifications and monitoring between picker invocations. If added, it should
 communicate over a Unix-domain socket and exit after an idle period rather than
@@ -211,6 +215,12 @@ discarded until a successful probe confirms it again.
 Heartbeats and unchanged snapshots are not retained as events. Archiving is a
 control-plane classification and does not delete native session artifacts.
 
+Notification state is stored with the session projection. A transition from
+working/approval/input into completed, a new approval/input request, or a
+failure marks the session unread. Repeated identical snapshots do not retrigger
+the event. Initial discovery also does not make every historical session
+unread. Manual archives suppress later notifications until restored.
+
 ## Archive Projection
 
 Archive state belongs to Rollcall rather than tmux or a coding-agent harness.
@@ -220,9 +230,10 @@ its last snapshot, native identity, timestamps, and resume path.
 The persistence layer supports manual archive and restore from the picker.
 Completed and unknown sessions are automatically settled after seven days
 without native interaction. Working, approval, input, and failed-attention
-sessions are exempt. Auto-settled sessions wake when native activity advances;
-manual archives do not. A manual restore pins that exact stale interaction in
-the active view until activity advances, preventing an immediate re-settle.
+sessions are exempt, as are sessions with unread notifications. Auto-settled
+sessions wake when native activity advances; manual archives do not. A manual
+restore pins that exact stale interaction in the active view until activity
+advances, preventing an immediate re-settle.
 
 Future extensions should add:
 
@@ -262,9 +273,11 @@ Active and Settled tabs use the same grouping and search behavior.
 
 Session rows show only the activity marker, native title, latest agent message,
 and Codex interaction age. Working markers pulse; completed rows use a quiet
-dim checkmark. Runtime, full path, and native identity are progressively
-disclosed through the optional detail strip. A loaded-outside-tmux row is
-visible for awareness and follows the explicit reopen policy above.
+dim checkmark. An unread transition adds a yellow dot and causes its project
+group to sort ahead of ordinary activity. Runtime, full path, and native
+identity are progressively disclosed through the optional detail strip. A
+loaded-outside-tmux row is visible for awareness and follows the explicit
+reopen policy above.
 
 An on-demand preview overlay shows the newest portion of a live tmux pane when
 one is safely attachable, otherwise the last cached response. It supports
