@@ -7,7 +7,7 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::codex::{CodexActivity, CodexSession};
+use crate::domain::{Activity, Session};
 
 pub const DEFAULT_STALE_AFTER_SECONDS: u64 = 7 * 24 * 60 * 60;
 
@@ -88,7 +88,7 @@ pub struct SessionTransition {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryEntry {
-    pub session: CodexSession,
+    pub session: Session,
     pub settled: bool,
     pub unread: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,10 +165,7 @@ impl Store {
         Ok(Self { connection })
     }
 
-    pub fn record(
-        &mut self,
-        sessions: &[CodexSession],
-    ) -> Result<Vec<SessionTransition>, StoreError> {
+    pub fn record(&mut self, sessions: &[Session]) -> Result<Vec<SessionTransition>, StoreError> {
         let transaction = self.connection.transaction()?;
         let last_seen = now_unix_seconds();
         let mut transitions = Vec::new();
@@ -259,7 +256,7 @@ impl Store {
                     })
                     .optional()?
                     .map(|(snapshot, archived, archive_reason)| {
-                        serde_json::from_str::<CodexSession>(&snapshot)
+                        serde_json::from_str::<Session>(&snapshot)
                             .map(|session| (session, archived, archive_reason))
                     })
                     .transpose()?;
@@ -291,7 +288,7 @@ impl Store {
         Ok(transitions)
     }
 
-    pub fn load(&self, archived: bool) -> Result<Vec<CodexSession>, StoreError> {
+    pub fn load(&self, archived: bool) -> Result<Vec<Session>, StoreError> {
         let mut statement = self.connection.prepare(
             "
             SELECT snapshot
@@ -456,7 +453,7 @@ impl Store {
 
         let mut settled = 0;
         for (session_id, snapshot, last_interaction) in candidates {
-            let session: CodexSession = serde_json::from_str(&snapshot)?;
+            let session: Session = serde_json::from_str(&snapshot)?;
             if !session.activity.can_auto_settle() {
                 continue;
             }
@@ -483,28 +480,23 @@ impl Store {
     }
 }
 
-fn attention_transition(
-    previous: &CodexSession,
-    current: &CodexSession,
-) -> Option<SessionTransitionKind> {
+fn attention_transition(previous: &Session, current: &Session) -> Option<SessionTransitionKind> {
     if previous.activity == current.activity {
         return None;
     }
     match current.activity {
-        CodexActivity::Completed
+        Activity::Completed
             if matches!(
                 previous.activity,
-                CodexActivity::Working
-                    | CodexActivity::WaitingApproval
-                    | CodexActivity::WaitingInput
+                Activity::Working | Activity::WaitingApproval | Activity::WaitingInput
             ) =>
         {
             Some(SessionTransitionKind::Completed)
         }
-        CodexActivity::WaitingApproval => Some(SessionTransitionKind::Approval),
-        CodexActivity::WaitingInput => Some(SessionTransitionKind::Input),
-        CodexActivity::Failed => Some(SessionTransitionKind::Failed),
-        CodexActivity::Working | CodexActivity::Completed | CodexActivity::Unknown => None,
+        Activity::WaitingApproval => Some(SessionTransitionKind::Approval),
+        Activity::WaitingInput => Some(SessionTransitionKind::Input),
+        Activity::Failed => Some(SessionTransitionKind::Failed),
+        Activity::Working | Activity::Completed | Activity::Unknown => None,
     }
 }
 
@@ -537,7 +529,7 @@ fn backfill_last_interaction(connection: &Connection) -> Result<(), StoreError> 
     drop(statement);
 
     for (session_id, snapshot) in rows {
-        let session: CodexSession = serde_json::from_str(&snapshot)?;
+        let session: Session = serde_json::from_str(&snapshot)?;
         connection.execute(
             "
             UPDATE sessions
@@ -584,21 +576,22 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{SessionTransitionKind, Store, attention_transition};
-    use crate::codex::{CodexActivity, CodexRuntime, CodexSession};
+    use crate::domain::{Activity, AgentKind, RuntimeOwner, Session};
 
-    fn session(title: &str) -> CodexSession {
-        CodexSession {
+    fn session(title: &str) -> Session {
+        Session {
             id: "topo:codex:019f".to_owned(),
             host: "topo".to_owned(),
+            agent: AgentKind::Codex,
             native_session_id: "019f".to_owned(),
             title: title.to_owned(),
             cwd: "/fabric".to_owned(),
             source: "cli".to_owned(),
-            activity: CodexActivity::Completed,
+            activity: Activity::Completed,
             last_message: "done".to_owned(),
             last_interaction_unix_seconds: 100,
             updated_unix_seconds: 100,
-            runtime: CodexRuntime::Resumable,
+            runtime: RuntimeOwner::Resumable,
             tmux: None,
         }
     }
@@ -655,7 +648,7 @@ mod tests {
     fn working_to_completed_creates_one_persisted_unread_transition() {
         let mut store = Store::open_memory().expect("store should open");
         let mut candidate = session("turn");
-        candidate.activity = CodexActivity::Working;
+        candidate.activity = Activity::Working;
         assert!(
             store
                 .record(&[candidate.clone()])
@@ -663,7 +656,7 @@ mod tests {
                 .is_empty()
         );
 
-        candidate.activity = CodexActivity::Completed;
+        candidate.activity = Activity::Completed;
         let transitions = store
             .record(&[candidate.clone()])
             .expect("completion should save");
@@ -703,28 +696,28 @@ mod tests {
     #[test]
     fn attention_transitions_cover_approval_input_failure_and_completion() {
         let mut previous = session("previous");
-        previous.activity = CodexActivity::Working;
+        previous.activity = Activity::Working;
         let mut current = previous.clone();
 
-        current.activity = CodexActivity::WaitingApproval;
+        current.activity = Activity::WaitingApproval;
         assert_eq!(
             attention_transition(&previous, &current),
             Some(SessionTransitionKind::Approval)
         );
-        previous.activity = CodexActivity::WaitingApproval;
-        current.activity = CodexActivity::WaitingInput;
+        previous.activity = Activity::WaitingApproval;
+        current.activity = Activity::WaitingInput;
         assert_eq!(
             attention_transition(&previous, &current),
             Some(SessionTransitionKind::Input)
         );
-        previous.activity = CodexActivity::WaitingInput;
-        current.activity = CodexActivity::Failed;
+        previous.activity = Activity::WaitingInput;
+        current.activity = Activity::Failed;
         assert_eq!(
             attention_transition(&previous, &current),
             Some(SessionTransitionKind::Failed)
         );
-        previous.activity = CodexActivity::WaitingApproval;
-        current.activity = CodexActivity::Completed;
+        previous.activity = Activity::WaitingApproval;
+        current.activity = Activity::Completed;
         assert_eq!(
             attention_transition(&previous, &current),
             Some(SessionTransitionKind::Completed)
@@ -735,12 +728,12 @@ mod tests {
     fn unread_completed_sessions_do_not_auto_settle_until_acknowledged() {
         let mut store = Store::open_memory().expect("store should open");
         let mut candidate = session("attention");
-        candidate.activity = CodexActivity::Working;
+        candidate.activity = Activity::Working;
         candidate.last_interaction_unix_seconds = 100;
         store
             .record(&[candidate.clone()])
             .expect("working snapshot should save");
-        candidate.activity = CodexActivity::Completed;
+        candidate.activity = Activity::Completed;
         store
             .record(&[candidate.clone()])
             .expect("completion should save");
@@ -766,14 +759,14 @@ mod tests {
     fn manually_archived_sessions_do_not_emit_new_attention() {
         let mut store = Store::open_memory().expect("store should open");
         let mut candidate = session("archived");
-        candidate.activity = CodexActivity::Working;
+        candidate.activity = Activity::Working;
         store
             .record(&[candidate.clone()])
             .expect("working snapshot should save");
         store
             .set_archived(&candidate.id, true)
             .expect("session should archive");
-        candidate.activity = CodexActivity::Completed;
+        candidate.activity = Activity::Completed;
 
         assert!(
             store
@@ -793,7 +786,7 @@ mod tests {
     fn auto_settled_sessions_wake_and_emit_new_attention() {
         let mut store = Store::open_memory().expect("store should open");
         let mut candidate = session("stale");
-        candidate.activity = CodexActivity::Completed;
+        candidate.activity = Activity::Completed;
         candidate.last_interaction_unix_seconds = 100;
         store
             .record(&[candidate.clone()])
@@ -805,7 +798,7 @@ mod tests {
             1
         );
 
-        candidate.activity = CodexActivity::WaitingInput;
+        candidate.activity = Activity::WaitingInput;
         candidate.last_interaction_unix_seconds = 101;
         let transitions = store
             .record(&[candidate.clone()])
@@ -887,10 +880,10 @@ mod tests {
     #[test]
     fn attention_states_never_auto_settle() {
         for activity in [
-            CodexActivity::Working,
-            CodexActivity::WaitingApproval,
-            CodexActivity::WaitingInput,
-            CodexActivity::Failed,
+            Activity::Working,
+            Activity::WaitingApproval,
+            Activity::WaitingInput,
+            Activity::Failed,
         ] {
             let mut store = Store::open_memory().expect("store should open");
             let mut candidate = session("attention");
@@ -1037,5 +1030,41 @@ mod tests {
             .expect("backfilled interaction should load");
 
         assert_eq!(last_interaction, 100);
+    }
+
+    #[test]
+    fn existing_snapshots_without_an_agent_discriminator_still_load() {
+        let store = Store::open_memory().expect("store should open");
+        let candidate = session("legacy adapter snapshot");
+        let mut snapshot =
+            serde_json::to_value(&candidate).expect("snapshot should serialize to JSON");
+        snapshot
+            .as_object_mut()
+            .expect("session snapshot should be an object")
+            .remove("agent");
+        store
+            .connection
+            .execute(
+                "
+                INSERT INTO sessions (
+                    session_id,
+                    snapshot,
+                    archived,
+                    last_seen,
+                    last_interaction
+                )
+                VALUES (?1, ?2, 0, 100, 100)
+                ",
+                params![
+                    candidate.id,
+                    serde_json::to_string(&snapshot).expect("legacy snapshot should serialize")
+                ],
+            )
+            .expect("legacy snapshot should save");
+
+        let loaded = store.load(false).expect("legacy snapshot should load");
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].agent, AgentKind::Codex);
     }
 }

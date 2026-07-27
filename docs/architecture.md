@@ -42,6 +42,11 @@ Harness-specific adapters normalize only:
 - Native attach and resume commands.
 - Optional read-only text extraction for search.
 
+The stored session record, stable key, runtime ownership, activity state, tmux
+binding, and picker/store integration are harness-neutral. A narrow adapter
+dispatcher currently routes those operations to Codex; no second harness is
+claimed as supported yet.
+
 The control plane does not normalize conversation rendering, tools, subagents,
 approvals UI, model selection, or other harness-native behavior.
 

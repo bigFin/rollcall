@@ -24,7 +24,8 @@ use ratatui::{
 };
 
 use crate::{
-    codex::{self, CodexActivity, CodexError, CodexRuntime, CodexSession},
+    agents::{self, AgentError},
+    domain::{Activity, LiveObservation, RuntimeOwner, Session, merge_observed_activity},
     hosts::{self, HostDiscoveryError, SshHost},
     notify,
     reconnect::{HostPhase, HostReconnectState, classify_failure},
@@ -41,7 +42,7 @@ const PREVIEW_CAPTURE_LINES: usize = 120;
 
 #[derive(Debug)]
 pub enum PickerError {
-    Codex(CodexError),
+    Agent(AgentError),
     HostDiscovery(HostDiscoveryError),
     Io(io::Error),
     PopupFailed(String),
@@ -51,7 +52,7 @@ pub enum PickerError {
 impl fmt::Display for PickerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Codex(error) => write!(formatter, "{error}"),
+            Self::Agent(error) => write!(formatter, "{error}"),
             Self::HostDiscovery(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "terminal picker failed: {error}"),
             Self::PopupFailed(message) => write!(formatter, "tmux popup failed: {message}"),
@@ -60,9 +61,9 @@ impl fmt::Display for PickerError {
     }
 }
 
-impl From<CodexError> for PickerError {
-    fn from(error: CodexError) -> Self {
-        Self::Codex(error)
+impl From<AgentError> for PickerError {
+    fn from(error: AgentError) -> Self {
+        Self::Agent(error)
     }
 }
 
@@ -88,7 +89,7 @@ pub fn run(initial_host: &str, limit: usize) -> Result<(), PickerError> {
     let mut app = PickerApp::new(initial_host, limit)?;
     let selection = run_terminal(&mut app)?;
     if let Some(session_id) = selection {
-        codex::attach(&session_id)?;
+        agents::attach(&session_id)?;
         app.acknowledge_session(&session_id, false)?;
     }
     Ok(())
@@ -278,12 +279,12 @@ enum RefreshEvent {
     Basic {
         generation: u64,
         target: String,
-        sessions: Vec<CodexSession>,
+        sessions: Vec<Session>,
     },
     Detailed {
         generation: u64,
         target: String,
-        sessions: Vec<CodexSession>,
+        sessions: Vec<Session>,
     },
     Failed {
         generation: u64,
@@ -297,7 +298,7 @@ enum RefreshEvent {
     Activity {
         generation: u64,
         target: String,
-        observations: Result<BTreeMap<String, codex::LiveObservation>, String>,
+        observations: Result<BTreeMap<String, LiveObservation>, String>,
     },
     Preview {
         request_id: u64,
@@ -326,8 +327,8 @@ struct SessionPreview {
 
 struct PickerApp {
     store: Store,
-    active: Vec<CodexSession>,
-    settled: Vec<CodexSession>,
+    active: Vec<Session>,
+    settled: Vec<Session>,
     rows: Vec<DashboardRow>,
     query: String,
     selected_row: usize,
@@ -662,7 +663,7 @@ impl PickerApp {
             self.status = Some("That session is no longer in the cached inventory.".to_owned());
             return Action::None;
         };
-        if session.runtime == CodexRuntime::ExternalFrontend && self.fresh_ids.contains(&session.id)
+        if session.runtime == RuntimeOwner::ExternalFrontend && self.fresh_ids.contains(&session.id)
         {
             let message =
                 "Owned by an external frontend; close or release it before resuming here."
@@ -710,7 +711,7 @@ impl PickerApp {
         self.input_mode = InputMode::Preview;
 
         let can_capture = self.fresh_ids.contains(&session.id)
-            && session.runtime == CodexRuntime::TmuxFrontend
+            && session.runtime == RuntimeOwner::TmuxFrontend
             && session.tmux.is_some();
         let content = if can_capture {
             PreviewContent::Loading
@@ -860,7 +861,7 @@ impl PickerApp {
         let generation = self.refresh_generation;
         let sender = self.refresh_tx.clone();
         let limit = self.limit;
-        let observed_host = codex::observed_host(&target);
+        let observed_host = agents::observed_host(&target);
         let cached = self
             .active
             .iter()
@@ -877,7 +878,7 @@ impl PickerApp {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        thread::spawn(move || match codex::discover(&target, Some(limit)) {
+        thread::spawn(move || match agents::discover(&target, Some(limit)) {
             Ok(sessions) => {
                 if sender
                     .send(RefreshEvent::Basic {
@@ -894,7 +895,7 @@ impl PickerApp {
                     .into_iter()
                     .filter(|session| session_needs_detail(session, &cached))
                     .collect::<Vec<_>>();
-                if detailed.is_empty() || codex::enrich_details(&target, &mut detailed).is_ok() {
+                if detailed.is_empty() || agents::enrich_details(&target, &mut detailed).is_ok() {
                     let _ = sender.send(RefreshEvent::Detailed {
                         generation,
                         target,
@@ -938,11 +939,11 @@ impl PickerApp {
                 {
                     return false;
                 }
-                let observed_host = codex::observed_host(target);
+                let observed_host = agents::observed_host(target);
                 self.active.iter().chain(&self.settled).any(|session| {
                     session.host == observed_host
                         && self.fresh_ids.contains(&session.id)
-                        && session.runtime != CodexRuntime::Resumable
+                        && session.runtime != RuntimeOwner::Resumable
                 })
             })
             .cloned()
@@ -954,7 +955,7 @@ impl PickerApp {
             let sender = self.refresh_tx.clone();
             let generation = self.refresh_generation;
             thread::spawn(move || {
-                let observations = codex::observe_live(&target).map_err(|error| error.to_string());
+                let observations = agents::observe_live(&target).map_err(|error| error.to_string());
                 let _ = sender.send(RefreshEvent::Activity {
                     generation,
                     target,
@@ -994,7 +995,7 @@ impl PickerApp {
                 self.preserve_cached_messages(&mut sessions);
                 self.record_fresh_sessions(&sessions)?;
                 if recovered {
-                    let observed_host = codex::observed_host(&target);
+                    let observed_host = agents::observed_host(&target);
                     self.notice = Some((
                         format!(
                             "{} is back online · restored {} sessions",
@@ -1099,10 +1100,10 @@ impl PickerApp {
     fn apply_live_observations(
         &mut self,
         target: &str,
-        observations: &BTreeMap<String, codex::LiveObservation>,
+        observations: &BTreeMap<String, LiveObservation>,
     ) -> Result<(), PickerError> {
         let selected_session_id = self.selected_session().map(|session| session.id.clone());
-        let observed_host = codex::observed_host(target);
+        let observed_host = agents::observed_host(target);
         let mut updates = Vec::new();
 
         for session in self.active.iter_mut().chain(self.settled.iter_mut()) {
@@ -1110,28 +1111,15 @@ impl PickerApp {
                 continue;
             }
             let before = (session.activity, session.runtime, session.tmux.clone());
-            if let Some(observation) = observations.get(&session.native_session_id) {
-                session.runtime = match &observation.owner {
-                    codex::LiveOwner::Tmux(binding) => {
-                        session.tmux = Some(binding.clone());
-                        CodexRuntime::TmuxFrontend
-                    }
-                    codex::LiveOwner::SharedBackend => {
-                        session.tmux = None;
-                        CodexRuntime::SharedBackend
-                    }
-                    codex::LiveOwner::ExternalFrontend => {
-                        session.tmux = None;
-                        CodexRuntime::ExternalFrontend
-                    }
-                };
-                session.activity =
-                    codex::merge_observed_activity(session.activity, observation.activity);
-            } else if session.runtime != CodexRuntime::Resumable {
-                session.runtime = CodexRuntime::Resumable;
+            if let Some(observation) = observations.get(&session.id) {
+                session.runtime = observation.runtime;
+                session.tmux.clone_from(&observation.tmux);
+                session.activity = merge_observed_activity(session.activity, observation.activity);
+            } else if session.runtime != RuntimeOwner::Resumable {
+                session.runtime = RuntimeOwner::Resumable;
                 session.tmux = None;
-                if session.activity == CodexActivity::Working {
-                    session.activity = CodexActivity::Completed;
+                if session.activity == Activity::Working {
+                    session.activity = Activity::Completed;
                 }
             }
             if before != (session.activity, session.runtime, session.tmux.clone()) {
@@ -1146,14 +1134,14 @@ impl PickerApp {
         Ok(())
     }
 
-    fn record_fresh_sessions(&mut self, sessions: &[CodexSession]) -> Result<(), PickerError> {
+    fn record_fresh_sessions(&mut self, sessions: &[Session]) -> Result<(), PickerError> {
         self.fresh_ids
             .extend(sessions.iter().map(|session| session.id.clone()));
         self.record_sessions(sessions)?;
         Ok(())
     }
 
-    fn record_sessions(&mut self, sessions: &[CodexSession]) -> Result<(), PickerError> {
+    fn record_sessions(&mut self, sessions: &[Session]) -> Result<(), PickerError> {
         let transitions = self.store.record(sessions)?;
         self.handle_transitions(&transitions);
         Ok(())
@@ -1188,7 +1176,7 @@ impl PickerApp {
         };
     }
 
-    fn preserve_cached_messages(&self, sessions: &mut [CodexSession]) {
+    fn preserve_cached_messages(&self, sessions: &mut [Session]) {
         for session in sessions {
             if !session.last_message.is_empty() {
                 continue;
@@ -1204,7 +1192,7 @@ impl PickerApp {
         }
     }
 
-    fn preserve_live_state(&self, sessions: &mut [CodexSession]) {
+    fn preserve_live_state(&self, sessions: &mut [Session]) {
         for session in sessions {
             let Some(current) = self
                 .active
@@ -1214,7 +1202,7 @@ impl PickerApp {
             else {
                 continue;
             };
-            if current.runtime != CodexRuntime::Resumable {
+            if current.runtime != RuntimeOwner::Resumable {
                 session.runtime = current.runtime;
                 session.tmux.clone_from(&current.tmux);
                 session.activity = current.activity;
@@ -1223,11 +1211,11 @@ impl PickerApp {
     }
 
     fn mark_host_cached(&mut self, target: &str) {
-        let observed_host = codex::observed_host(target);
+        let observed_host = agents::observed_host(target);
         for session in self.active.iter_mut().chain(self.settled.iter_mut()) {
             if session.host == observed_host {
                 self.fresh_ids.remove(&session.id);
-                session.runtime = CodexRuntime::Resumable;
+                session.runtime = RuntimeOwner::Resumable;
                 session.tmux = None;
             }
         }
@@ -1282,14 +1270,14 @@ impl PickerApp {
     fn target_for_observed_host(&self, host: &str) -> Option<&String> {
         self.discovery_targets
             .iter()
-            .find(|target| codex::observed_host(target) == host)
+            .find(|target| agents::observed_host(target) == host)
     }
 
     fn is_important_target(&self, target: &str) -> bool {
         if target == "local" {
             return true;
         }
-        let observed_host = codex::observed_host(target);
+        let observed_host = agents::observed_host(target);
         if self.host_filter == observed_host
             || self
                 .selected_session()
@@ -1301,10 +1289,10 @@ impl PickerApp {
             session.host == observed_host
                 && matches!(
                     session.activity,
-                    CodexActivity::Working
-                        | CodexActivity::WaitingApproval
-                        | CodexActivity::WaitingInput
-                        | CodexActivity::Failed
+                    Activity::Working
+                        | Activity::WaitingApproval
+                        | Activity::WaitingInput
+                        | Activity::Failed
                 )
         })
     }
@@ -1316,7 +1304,7 @@ impl PickerApp {
         self.unread_ids = self.store.unread_session_ids()?.into_iter().collect();
         for session in self.active.iter_mut().chain(self.settled.iter_mut()) {
             if !self.fresh_ids.contains(&session.id) {
-                session.runtime = CodexRuntime::Resumable;
+                session.runtime = RuntimeOwner::Resumable;
                 session.tmux = None;
             }
         }
@@ -1376,7 +1364,7 @@ impl PickerApp {
         hosts.extend(
             self.discovery_targets
                 .iter()
-                .map(|target| codex::observed_host(target)),
+                .map(|target| agents::observed_host(target)),
         );
         hosts.extend(
             self.active
@@ -1500,14 +1488,14 @@ impl PickerApp {
             });
     }
 
-    fn current_sessions(&self) -> &[CodexSession] {
+    fn current_sessions(&self) -> &[Session] {
         match self.view {
             DashboardView::Active => &self.active,
             DashboardView::Settled => &self.settled,
         }
     }
 
-    fn selected_session(&self) -> Option<&CodexSession> {
+    fn selected_session(&self) -> Option<&Session> {
         let DashboardRow::Session(index) = self.rows.get(self.selected_row)? else {
             return None;
         };
@@ -1583,7 +1571,7 @@ fn normalize_host_filter(host: &str) -> String {
     if host == ALL_HOSTS {
         ALL_HOSTS.to_owned()
     } else {
-        codex::observed_host(host)
+        agents::observed_host(host)
     }
 }
 
@@ -1613,7 +1601,7 @@ fn restrict_discovery_targets(targets: Vec<String>, host: &str) -> Vec<String> {
     let observed_host = normalize_host_filter(host);
     let matching = targets
         .into_iter()
-        .filter(|target| target == host || codex::observed_host(target) == observed_host)
+        .filter(|target| target == host || agents::observed_host(target) == observed_host)
         .collect::<Vec<_>>();
     if matching.is_empty() {
         vec![host.to_owned()]
@@ -1665,10 +1653,7 @@ fn write_transition(
     }
 }
 
-fn session_needs_detail(
-    session: &CodexSession,
-    cached: &BTreeMap<String, (u64, u64, bool)>,
-) -> bool {
+fn session_needs_detail(session: &Session, cached: &BTreeMap<String, (u64, u64, bool)>) -> bool {
     cached
         .get(&session.native_session_id)
         .is_none_or(|(last_interaction, updated, has_message)| {
@@ -1678,7 +1663,7 @@ fn session_needs_detail(
         })
 }
 
-fn session_matches(session: &CodexSession, query: &str) -> bool {
+fn session_matches(session: &Session, query: &str) -> bool {
     query.is_empty()
         || [
             session.title.as_str(),
@@ -1697,13 +1682,13 @@ fn session_matches(session: &CodexSession, query: &str) -> bool {
         .any(|value| value.to_lowercase().contains(query))
 }
 
-const fn activity_priority(activity: CodexActivity) -> u8 {
+const fn activity_priority(activity: Activity) -> u8 {
     match activity {
-        CodexActivity::Working => 0,
-        CodexActivity::WaitingApproval | CodexActivity::WaitingInput => 1,
-        CodexActivity::Failed => 2,
-        CodexActivity::Completed => 3,
-        CodexActivity::Unknown => 4,
+        Activity::Working => 0,
+        Activity::WaitingApproval | Activity::WaitingInput => 1,
+        Activity::Failed => 2,
+        Activity::Completed => 3,
+        Activity::Unknown => 4,
     }
 }
 
@@ -1957,21 +1942,16 @@ fn compact_home(path: &str) -> String {
     }
 }
 
-fn session_item(
-    session: &CodexSession,
-    fresh: bool,
-    unread: bool,
-    width: u16,
-) -> ListItem<'static> {
+fn session_item(session: &Session, fresh: bool, unread: bool, width: u16) -> ListItem<'static> {
     let (marker, marker_style, _) = if fresh {
         activity_style(session.activity)
     } else {
         ("◌", muted_style(), "cached")
     };
     let status_label = match (fresh, session.activity) {
-        (true, CodexActivity::WaitingApproval) => "approval ",
-        (true, CodexActivity::WaitingInput) => "input ",
-        (true, CodexActivity::Failed) => "failed ",
+        (true, Activity::WaitingApproval) => "approval ",
+        (true, Activity::WaitingInput) => "input ",
+        (true, Activity::Failed) => "failed ",
         _ => "",
     };
     let suffix = format!("  {}", format_age(session.last_interaction_unix_seconds));
@@ -2005,7 +1985,7 @@ fn session_item(
     }
     spans.push(Span::styled(
         truncate_with_ellipsis(&session.title, title_width),
-        if session.activity == CodexActivity::Working && fresh {
+        if session.activity == Activity::Working && fresh {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -2025,17 +2005,17 @@ fn session_item(
     ListItem::new(Line::from(spans))
 }
 
-fn activity_style(activity: CodexActivity) -> (&'static str, Style, &'static str) {
+fn activity_style(activity: Activity) -> (&'static str, Style, &'static str) {
     match activity {
-        CodexActivity::Working => {
+        Activity::Working => {
             let (marker, color) = working_pulse();
             (marker, Style::default().fg(color), "working")
         }
-        CodexActivity::WaitingApproval => ("◆", Style::default().fg(Color::Yellow), "approval"),
-        CodexActivity::WaitingInput => ("◆", Style::default().fg(Color::Yellow), "input"),
-        CodexActivity::Completed => ("✓", muted_style(), "completed"),
-        CodexActivity::Failed => ("!", Style::default().fg(Color::Red), "failed"),
-        CodexActivity::Unknown => ("○", muted_style(), "unknown"),
+        Activity::WaitingApproval => ("◆", Style::default().fg(Color::Yellow), "approval"),
+        Activity::WaitingInput => ("◆", Style::default().fg(Color::Yellow), "input"),
+        Activity::Completed => ("✓", muted_style(), "completed"),
+        Activity::Failed => ("!", Style::default().fg(Color::Red), "failed"),
+        Activity::Unknown => ("○", muted_style(), "unknown"),
     }
 }
 
@@ -2050,7 +2030,7 @@ fn working_pulse() -> (&'static str, Color) {
     )
 }
 
-fn activity_label(activity: CodexActivity) -> &'static str {
+fn activity_label(activity: Activity) -> &'static str {
     activity_style(activity).2
 }
 
@@ -2073,13 +2053,13 @@ fn draw_selected_detail(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
         ("◌", muted_style(), "cached")
     };
     let runtime = match session.runtime {
-        CodexRuntime::TmuxFrontend => session.tmux.as_ref().map_or_else(
+        RuntimeOwner::TmuxFrontend => session.tmux.as_ref().map_or_else(
             || "tmux".to_owned(),
             |binding| format!("tmux {}", binding.session),
         ),
-        CodexRuntime::SharedBackend => "Rollcall backend".to_owned(),
-        CodexRuntime::ExternalFrontend => "external frontend".to_owned(),
-        CodexRuntime::Resumable => "resumable".to_owned(),
+        RuntimeOwner::SharedBackend => "Rollcall backend".to_owned(),
+        RuntimeOwner::ExternalFrontend => "external frontend".to_owned(),
+        RuntimeOwner::Resumable => "resumable".to_owned(),
     };
     let width = usize::from(area.width).saturating_sub(2);
     let title_width = width.saturating_sub(status.len() + 3);
@@ -2359,7 +2339,7 @@ fn draw_preview(frame: &mut Frame<'_>, app: &PickerApp) {
     }
 }
 
-fn cached_preview(session: &CodexSession) -> String {
+fn cached_preview(session: &Session) -> String {
     if session.last_message.trim().is_empty() {
         format!(
             "{}\n\nNo cached agent response is available.\n\n{} / {}",
@@ -2378,11 +2358,11 @@ fn cached_preview(session: &CodexSession) -> String {
     }
 }
 
-const fn cached_preview_source(session: &CodexSession) -> &'static str {
+const fn cached_preview_source(session: &Session) -> &'static str {
     match session.runtime {
-        CodexRuntime::ExternalFrontend => "external frontend · cached response",
-        CodexRuntime::SharedBackend => "Rollcall backend · cached response",
-        CodexRuntime::TmuxFrontend | CodexRuntime::Resumable => "cached response",
+        RuntimeOwner::ExternalFrontend => "external frontend · cached response",
+        RuntimeOwner::SharedBackend => "Rollcall backend · cached response",
+        RuntimeOwner::TmuxFrontend | RuntimeOwner::Resumable => "cached response",
     }
 }
 
@@ -2507,27 +2487,26 @@ mod tests {
         wrap_preview_body, write_transition,
     };
     use crate::{
-        codex::{
-            self, CodexActivity, CodexRuntime, CodexSession, LiveObservation, LiveOwner,
-            TmuxBinding,
-        },
+        agents,
+        domain::{Activity, AgentKind, LiveObservation, RuntimeOwner, Session, TmuxBinding},
         hosts::{ConnectivityState, SshHost},
         store::{SessionTransition, SessionTransitionKind, Store},
     };
 
-    fn session(id: &str, cwd: &str, title: &str) -> CodexSession {
-        CodexSession {
+    fn session(id: &str, cwd: &str, title: &str) -> Session {
+        Session {
             id: format!("topo:codex:{id}"),
             host: "topo".to_owned(),
+            agent: AgentKind::Codex,
             native_session_id: id.to_owned(),
             title: title.to_owned(),
             cwd: cwd.to_owned(),
             source: "cli".to_owned(),
-            activity: CodexActivity::Completed,
+            activity: Activity::Completed,
             last_message: "The implementation is ready.".to_owned(),
             last_interaction_unix_seconds: 100,
             updated_unix_seconds: 100,
-            runtime: CodexRuntime::TmuxFrontend,
+            runtime: RuntimeOwner::TmuxFrontend,
             tmux: Some(TmuxBinding {
                 session: "agents".to_owned(),
                 pane: "%3".to_owned(),
@@ -2563,7 +2542,7 @@ mod tests {
     fn local_host_filter_uses_the_observed_hostname() {
         assert_eq!(
             normalize_host_filter("local"),
-            codex::observed_host("local")
+            agents::observed_host("local")
         );
         assert_eq!(normalize_host_filter("all"), "all");
         assert_eq!(normalize_host_filter("coda"), "coda");
@@ -2572,9 +2551,9 @@ mod tests {
     #[test]
     fn foreign_frontend_cannot_be_attached_without_managed_tmux() {
         let mut loaded = session("019f", "/fabric", "Loaded thread");
-        loaded.runtime = CodexRuntime::ExternalFrontend;
+        loaded.runtime = RuntimeOwner::ExternalFrontend;
         loaded.tmux = None;
-        loaded.activity = CodexActivity::Working;
+        loaded.activity = Activity::Working;
         let mut app = app_with_sessions(vec![loaded], Vec::new());
 
         assert_eq!(
@@ -2591,7 +2570,7 @@ mod tests {
     #[test]
     fn completed_foreign_frontend_is_also_left_alone() {
         let mut loaded = session("019f", "/fabric", "Loaded thread");
-        loaded.runtime = CodexRuntime::ExternalFrontend;
+        loaded.runtime = RuntimeOwner::ExternalFrontend;
         loaded.tmux = None;
         let mut app = app_with_sessions(vec![loaded], Vec::new());
 
@@ -2604,7 +2583,7 @@ mod tests {
     #[test]
     fn shared_backend_threads_can_open_a_terminal_frontend() {
         let mut loaded = session("019f", "/fabric", "Backend-only thread");
-        loaded.runtime = CodexRuntime::SharedBackend;
+        loaded.runtime = RuntimeOwner::SharedBackend;
         loaded.tmux = None;
         let mut app = app_with_sessions(vec![loaded], Vec::new());
 
@@ -2663,7 +2642,7 @@ mod tests {
     #[test]
     fn resumable_preview_uses_cached_response_without_starting_a_capture() {
         let mut candidate = session("019f", "/fabric", "Cached thread");
-        candidate.runtime = CodexRuntime::Resumable;
+        candidate.runtime = RuntimeOwner::Resumable;
         candidate.tmux = None;
         let mut app = app_with_sessions(vec![candidate], Vec::new());
 
@@ -2687,7 +2666,7 @@ mod tests {
     #[test]
     fn preview_archive_action_uses_the_current_projection() {
         let mut candidate = session("019f", "/fabric", "Moved thread");
-        candidate.runtime = CodexRuntime::Resumable;
+        candidate.runtime = RuntimeOwner::Resumable;
         candidate.tmux = None;
         let mut app = app_with_sessions(vec![candidate], Vec::new());
         app.start_preview();
@@ -2710,7 +2689,7 @@ mod tests {
     #[test]
     fn preview_enter_keeps_an_external_frontend_open_with_a_notice() {
         let mut candidate = session("019f", "/fabric", "External thread");
-        candidate.runtime = CodexRuntime::ExternalFrontend;
+        candidate.runtime = RuntimeOwner::ExternalFrontend;
         candidate.tmux = None;
         let mut app = app_with_sessions(vec![candidate], Vec::new());
         app.start_preview();
@@ -2731,7 +2710,7 @@ mod tests {
     #[test]
     fn preview_refresh_ignores_stale_results_and_accepts_the_matching_capture() {
         let mut candidate = session("019f", "/fabric", "Preview refresh");
-        candidate.runtime = CodexRuntime::Resumable;
+        candidate.runtime = RuntimeOwner::Resumable;
         candidate.tmux = None;
         let mut app = app_with_sessions(vec![candidate], Vec::new());
         app.start_preview();
@@ -2839,39 +2818,42 @@ mod tests {
 
     #[test]
     fn live_observations_update_working_and_completed_state() {
-        let observed_host = codex::observed_host("local");
+        let observed_host = agents::observed_host("local");
         let mut candidate = session("019f", "/fabric", "Live thread");
         candidate.host.clone_from(&observed_host);
         candidate.id = format!("{observed_host}:codex:019f");
-        candidate.runtime = CodexRuntime::ExternalFrontend;
+        candidate.runtime = RuntimeOwner::ExternalFrontend;
         candidate.tmux = None;
+        let session_id = candidate.id.clone();
         let mut app = app_with_sessions(vec![candidate], Vec::new());
 
         app.apply_live_observations(
             "local",
             &BTreeMap::from([(
-                "019f".to_owned(),
+                session_id.clone(),
                 LiveObservation {
-                    activity: CodexActivity::Working,
-                    owner: LiveOwner::ExternalFrontend,
+                    activity: Activity::Working,
+                    runtime: RuntimeOwner::ExternalFrontend,
+                    tmux: None,
                 },
             )]),
         )
         .expect("working observation should apply");
-        assert_eq!(app.active[0].activity, CodexActivity::Working);
+        assert_eq!(app.active[0].activity, Activity::Working);
 
         app.apply_live_observations(
             "local",
             &BTreeMap::from([(
-                "019f".to_owned(),
+                session_id,
                 LiveObservation {
-                    activity: CodexActivity::Completed,
-                    owner: LiveOwner::ExternalFrontend,
+                    activity: Activity::Completed,
+                    runtime: RuntimeOwner::ExternalFrontend,
+                    tmux: None,
                 },
             )]),
         )
         .expect("completion observation should apply");
-        assert_eq!(app.active[0].activity, CodexActivity::Completed);
+        assert_eq!(app.active[0].activity, Activity::Completed);
         assert!(app.unread_ids.contains(&app.active[0].id));
     }
 
@@ -2880,7 +2862,7 @@ mod tests {
         let mut completed = session("019f", "/newer", "Completed");
         completed.last_interaction_unix_seconds = 200;
         let mut working = session("019e", "/older", "Working");
-        working.activity = CodexActivity::Working;
+        working.activity = Activity::Working;
         working.last_interaction_unix_seconds = 100;
         let app = app_with_sessions(vec![completed, working], Vec::new());
 
@@ -2894,7 +2876,7 @@ mod tests {
     fn unread_completed_sessions_sort_ahead_of_working_sessions() {
         let completed = session("019f", "/completed", "Unread completion");
         let mut working = session("019e", "/working", "Working");
-        working.activity = CodexActivity::Working;
+        working.activity = Activity::Working;
         let mut app = app_with_sessions(vec![working, completed], Vec::new());
         app.unread_ids.insert("topo:codex:019f".to_owned());
         app.rebuild_rows_selecting(None);
@@ -3051,7 +3033,7 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("ab", 1), "…");
     }
 
-    fn app_with_sessions(active: Vec<CodexSession>, settled: Vec<CodexSession>) -> PickerApp {
+    fn app_with_sessions(active: Vec<Session>, settled: Vec<Session>) -> PickerApp {
         let fresh_ids = active
             .iter()
             .chain(&settled)

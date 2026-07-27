@@ -40,9 +40,11 @@ implemented. Meaningful lifecycle transitions also create persistent unread
 attention and local notifications while Rollcall is running.
 
 Codex inventory and resumed TUIs now converge on one lazily started app-server
-per host and `CODEX_HOME`. Additional coding-agent adapters, background
-observation while every Rollcall process is closed, configurable stale-after
-rules, and the optional local broker remain ahead.
+per host and `CODEX_HOME`. The persisted session model and control-plane
+dispatch boundary are harness-neutral, but Codex remains the only implemented
+adapter today. Additional coding-agent adapters, background observation while
+every Rollcall process is closed, configurable stale-after rules, and the
+optional local broker remain ahead.
 
 ## Product Boundary
 

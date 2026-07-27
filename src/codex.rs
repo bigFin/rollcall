@@ -5,77 +5,17 @@ use std::{
     process::{Command, Stdio},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{codex_runtime, tmux};
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodexSession {
-    pub id: String,
-    pub host: String,
-    pub native_session_id: String,
-    pub title: String,
-    pub cwd: String,
-    pub source: String,
-    pub activity: CodexActivity,
-    pub last_message: String,
-    pub last_interaction_unix_seconds: u64,
-    pub updated_unix_seconds: u64,
-    pub runtime: CodexRuntime,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tmux: Option<TmuxBinding>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CodexRuntime {
-    Resumable,
-    SharedBackend,
-    #[serde(alias = "loadedOutsideTmux")]
-    ExternalFrontend,
-    #[serde(alias = "loadedInTmux")]
-    TmuxFrontend,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CodexActivity {
-    Working,
-    WaitingApproval,
-    WaitingInput,
-    Completed,
-    Failed,
-    Unknown,
-}
-
-impl CodexActivity {
-    #[must_use]
-    pub const fn can_auto_settle(self) -> bool {
-        matches!(self, Self::Completed | Self::Unknown)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TmuxBinding {
-    pub session: String,
-    pub pane: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum LiveOwner {
-    SharedBackend,
-    ExternalFrontend,
-    Tmux(TmuxBinding),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LiveObservation {
-    pub activity: CodexActivity,
-    pub owner: LiveOwner,
-}
+use crate::{
+    codex_runtime,
+    domain::{
+        Activity, AgentKind, LiveObservation, RuntimeOwner, Session, SessionKey, TmuxBinding,
+        merge_observed_activity,
+    },
+    tmux,
+};
 
 const LIVE_OBSERVATION_SCRIPT: &str = r#"
 declare -A pane_session pane_id seen
@@ -183,7 +123,6 @@ done
 
 #[derive(Debug)]
 pub enum CodexError {
-    InvalidSessionId(String),
     MissingSession(String),
     ExternalFrontend(String),
     Protocol(String),
@@ -201,10 +140,6 @@ pub enum CodexError {
 impl fmt::Display for CodexError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidSessionId(session) => write!(
-                formatter,
-                "invalid Codex session {session:?}; expected HOST:codex:SESSION_ID"
-            ),
             Self::MissingSession(session) => {
                 write!(
                     formatter,
@@ -260,7 +195,7 @@ impl From<tmux::TmuxError> for CodexError {
     }
 }
 
-pub fn discover(host: &str, limit: Option<usize>) -> Result<Vec<CodexSession>, CodexError> {
+pub fn discover(host: &str, limit: Option<usize>) -> Result<Vec<Session>, CodexError> {
     let observed_host = observed_host(host);
     let mut client = AppServerClient::start(host)?;
     let mut threads = client.list_threads(limit)?;
@@ -270,16 +205,13 @@ pub fn discover(host: &str, limit: Option<usize>) -> Result<Vec<CodexSession>, C
     Ok(threads)
 }
 
-pub fn discover_detailed(
-    host: &str,
-    limit: Option<usize>,
-) -> Result<Vec<CodexSession>, CodexError> {
+pub fn discover_detailed(host: &str, limit: Option<usize>) -> Result<Vec<Session>, CodexError> {
     let mut sessions = discover(host, limit)?;
     enrich_details(host, &mut sessions)?;
     Ok(sessions)
 }
 
-pub fn enrich_details(host: &str, sessions: &mut [CodexSession]) -> Result<(), CodexError> {
+pub fn enrich_details(host: &str, sessions: &mut [Session]) -> Result<(), CodexError> {
     let mut client = AppServerClient::start(host)?;
     client.enrich_threads(sessions);
     client.stop();
@@ -289,15 +221,17 @@ pub fn enrich_details(host: &str, sessions: &mut [CodexSession]) -> Result<(), C
 fn correlate_live_sessions(
     host: &str,
     observed_host: &str,
-    threads: &mut [CodexSession],
+    threads: &mut [Session],
 ) -> Result<(), CodexError> {
     let live = observe_live(host)?;
     for thread in threads.iter_mut() {
         thread.host = observed_host.to_owned();
-        thread.id = format!("{observed_host}:codex:{}", thread.native_session_id);
+        thread.agent = AgentKind::Codex;
+        thread.id = thread.key().stable_id();
         if let Some(observation) = live.get(&thread.native_session_id) {
-            thread.runtime = match &observation.owner {
-                LiveOwner::Tmux(binding) => {
+            thread.runtime = observation.runtime;
+            thread.tmux = match (&observation.runtime, &observation.tmux) {
+                (RuntimeOwner::TmuxFrontend, Some(binding)) => {
                     let mut binding = binding.clone();
                     if let Some(desired) = normalized_managed_tmux_name(
                         &binding.session,
@@ -307,17 +241,9 @@ fn correlate_live_sessions(
                     {
                         binding.session = desired;
                     }
-                    thread.tmux = Some(binding);
-                    CodexRuntime::TmuxFrontend
+                    Some(binding)
                 }
-                LiveOwner::SharedBackend => {
-                    thread.tmux = None;
-                    CodexRuntime::SharedBackend
-                }
-                LiveOwner::ExternalFrontend => {
-                    thread.tmux = None;
-                    CodexRuntime::ExternalFrontend
-                }
+                _ => None,
             };
             thread.activity = merge_observed_activity(thread.activity, observation.activity);
         }
@@ -332,19 +258,24 @@ fn correlate_live_sessions(
     Ok(())
 }
 
-pub fn attach(session_id: &str) -> Result<(), CodexError> {
-    let (host, native_id) = parse_session_id(session_id)?;
+pub fn attach(host: &str, native_id: &str) -> Result<(), CodexError> {
+    let session_id = SessionKey {
+        host: observed_host(host),
+        agent: AgentKind::Codex,
+        native_session_id: native_id.to_owned(),
+    }
+    .stable_id();
     let session = discover(host, None)?
         .into_iter()
         .find(|session| session.native_session_id == native_id)
-        .ok_or_else(|| CodexError::MissingSession(session_id.to_owned()))?;
+        .ok_or_else(|| CodexError::MissingSession(session_id))?;
 
     match (&session.runtime, &session.tmux) {
-        (CodexRuntime::TmuxFrontend, Some(binding)) => {
+        (RuntimeOwner::TmuxFrontend, Some(binding)) => {
             tmux::attach_pane(&session.host, &binding.session, &binding.pane)?;
             Ok(())
         }
-        (CodexRuntime::ExternalFrontend, _) => Err(CodexError::ExternalFrontend(session.id)),
+        (RuntimeOwner::ExternalFrontend, _) => Err(CodexError::ExternalFrontend(session.id)),
         _ => {
             let app_server_socket = codex_runtime::ensure(host)?;
             tmux::resume_codex(
@@ -356,16 +287,6 @@ pub fn attach(session_id: &str) -> Result<(), CodexError> {
             )
             .map_err(Into::into)
         }
-    }
-}
-
-fn parse_session_id(session: &str) -> Result<(&str, &str), CodexError> {
-    let fields = session.splitn(3, ':').collect::<Vec<_>>();
-    match fields.as_slice() {
-        [host, "codex", native_id] if !host.is_empty() && !native_id.is_empty() => {
-            Ok((host, native_id))
-        }
-        _ => Err(CodexError::InvalidSessionId(session.to_owned())),
     }
 }
 
@@ -463,7 +384,7 @@ impl AppServerClient {
         Ok(client)
     }
 
-    fn list_threads(&mut self, limit: Option<usize>) -> Result<Vec<CodexSession>, CodexError> {
+    fn list_threads(&mut self, limit: Option<usize>) -> Result<Vec<Session>, CodexError> {
         let mut sessions = Vec::new();
         let mut cursor: Option<String> = None;
 
@@ -487,7 +408,7 @@ impl AppServerClient {
             )?;
             let response = self.response(request_id)?;
             let result: ThreadListResult = serde_json::from_value(response)?;
-            sessions.extend(result.data.into_iter().map(CodexSession::from));
+            sessions.extend(result.data.into_iter().map(Session::from));
             cursor = result.next_cursor;
 
             if cursor.is_none() {
@@ -498,7 +419,7 @@ impl AppServerClient {
         Ok(sessions)
     }
 
-    fn enrich_threads(&mut self, sessions: &mut [CodexSession]) {
+    fn enrich_threads(&mut self, sessions: &mut [Session]) {
         for session in sessions {
             let Ok(request_id) = self.request(
                 "thread/read",
@@ -516,14 +437,14 @@ impl AppServerClient {
                 continue;
             };
             if let Some(turn) = result.thread.turns.last()
-                && session.activity != CodexActivity::Working
-                && session.activity != CodexActivity::WaitingApproval
-                && session.activity != CodexActivity::WaitingInput
+                && session.activity != Activity::Working
+                && session.activity != Activity::WaitingApproval
+                && session.activity != Activity::WaitingInput
             {
                 session.activity = match turn.status.as_str() {
-                    "inProgress" => CodexActivity::Working,
-                    "failed" => CodexActivity::Failed,
-                    "completed" | "interrupted" => CodexActivity::Completed,
+                    "inProgress" => Activity::Working,
+                    "failed" => Activity::Failed,
+                    "completed" | "interrupted" => Activity::Completed,
                     _ => session.activity,
                 };
             }
@@ -647,7 +568,7 @@ struct ReadTurn {
     items: Vec<Value>,
 }
 
-impl From<RawThread> for CodexSession {
+impl From<RawThread> for Session {
     fn from(thread: RawThread) -> Self {
         let title = thread
             .name
@@ -657,6 +578,7 @@ impl From<RawThread> for CodexSession {
         Self {
             id: String::new(),
             host: String::new(),
+            agent: AgentKind::Codex,
             native_session_id: thread.id,
             title,
             cwd: thread.cwd,
@@ -667,27 +589,27 @@ impl From<RawThread> for CodexSession {
                 thread.recency_at.unwrap_or(thread.updated_at),
             ),
             updated_unix_seconds: positive_seconds(thread.updated_at),
-            runtime: CodexRuntime::Resumable,
+            runtime: RuntimeOwner::Resumable,
             tmux: None,
         }
     }
 }
 
-fn activity_from_status(status: &RawThreadStatus) -> CodexActivity {
+fn activity_from_status(status: &RawThreadStatus) -> Activity {
     match status {
         RawThreadStatus::Active { active_flags }
             if active_flags.iter().any(|flag| flag == "waitingOnApproval") =>
         {
-            CodexActivity::WaitingApproval
+            Activity::WaitingApproval
         }
         RawThreadStatus::Active { active_flags }
             if active_flags.iter().any(|flag| flag == "waitingOnUserInput") =>
         {
-            CodexActivity::WaitingInput
+            Activity::WaitingInput
         }
-        RawThreadStatus::Active { .. } => CodexActivity::Working,
-        RawThreadStatus::SystemError => CodexActivity::Failed,
-        RawThreadStatus::Idle | RawThreadStatus::NotLoaded => CodexActivity::Completed,
+        RawThreadStatus::Active { .. } => Activity::Working,
+        RawThreadStatus::SystemError => Activity::Failed,
+        RawThreadStatus::Idle | RawThreadStatus::NotLoaded => Activity::Completed,
     }
 }
 
@@ -786,104 +708,71 @@ fn parse_live_observations(output: &str) -> BTreeMap<String, LiveObservation> {
         let [native_id, owner, session, pane, activity] = fields.as_slice() else {
             continue;
         };
-        let owner = match *owner {
-            "shared" => LiveOwner::SharedBackend,
-            "external" => LiveOwner::ExternalFrontend,
-            "tmux" if !session.is_empty() => LiveOwner::Tmux(TmuxBinding {
-                session: (*session).to_owned(),
-                pane: (*pane).to_owned(),
-            }),
+        let (runtime, tmux) = match *owner {
+            "shared" => (RuntimeOwner::SharedBackend, None),
+            "external" => (RuntimeOwner::ExternalFrontend, None),
+            "tmux" if !session.is_empty() => (
+                RuntimeOwner::TmuxFrontend,
+                Some(TmuxBinding {
+                    session: (*session).to_owned(),
+                    pane: (*pane).to_owned(),
+                }),
+            ),
             _ => continue,
         };
         let activity = match *activity {
-            "working" => CodexActivity::Working,
-            "completed" => CodexActivity::Completed,
-            _ => CodexActivity::Unknown,
+            "working" => Activity::Working,
+            "completed" => Activity::Completed,
+            _ => Activity::Unknown,
         };
         observations
             .entry((*native_id).to_owned())
             .and_modify(|existing| {
-                if owner_priority(&owner) > owner_priority(&existing.owner) {
-                    existing.owner.clone_from(&owner);
+                if owner_priority(runtime) > owner_priority(existing.runtime) {
+                    existing.runtime = runtime;
+                    existing.tmux.clone_from(&tmux);
                 }
                 existing.activity = merge_live_activity(existing.activity, activity);
             })
-            .or_insert(LiveObservation { activity, owner });
+            .or_insert(LiveObservation {
+                activity,
+                runtime,
+                tmux,
+            });
     }
     observations
 }
 
-const fn merge_live_activity(current: CodexActivity, observed: CodexActivity) -> CodexActivity {
-    if matches!(current, CodexActivity::Working) || matches!(observed, CodexActivity::Working) {
-        CodexActivity::Working
-    } else if matches!(current, CodexActivity::Completed)
-        || matches!(observed, CodexActivity::Completed)
-    {
-        CodexActivity::Completed
+const fn merge_live_activity(current: Activity, observed: Activity) -> Activity {
+    if matches!(current, Activity::Working) || matches!(observed, Activity::Working) {
+        Activity::Working
+    } else if matches!(current, Activity::Completed) || matches!(observed, Activity::Completed) {
+        Activity::Completed
     } else {
-        CodexActivity::Unknown
+        Activity::Unknown
     }
 }
 
-const fn owner_priority(owner: &LiveOwner) -> u8 {
-    match owner {
-        LiveOwner::SharedBackend => 0,
-        LiveOwner::ExternalFrontend => 1,
-        LiveOwner::Tmux(_) => 2,
-    }
-}
-
-pub(crate) const fn merge_observed_activity(
-    current: CodexActivity,
-    observed: CodexActivity,
-) -> CodexActivity {
-    match observed {
-        CodexActivity::Completed => CodexActivity::Completed,
-        CodexActivity::Working
-            if !matches!(
-                current,
-                CodexActivity::WaitingApproval | CodexActivity::WaitingInput
-            ) =>
-        {
-            CodexActivity::Working
-        }
-        _ => current,
+const fn owner_priority(runtime: RuntimeOwner) -> u8 {
+    match runtime {
+        RuntimeOwner::Resumable | RuntimeOwner::SharedBackend => 0,
+        RuntimeOwner::ExternalFrontend => 1,
+        RuntimeOwner::TmuxFrontend => 2,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::{
-        CodexActivity, CodexRuntime, CodexSession, LIVE_OBSERVATION_SCRIPT, LiveOwner, RawThread,
-        RawThreadStatus, compact_title, deterministic_tmux_name, merge_live_activity,
-        merge_observed_activity, normalized_managed_tmux_name, parse_live_observations,
-        parse_session_id,
+        Activity, LIVE_OBSERVATION_SCRIPT, RawThread, RawThreadStatus, RuntimeOwner, Session,
+        compact_title, deterministic_tmux_name, merge_live_activity, normalized_managed_tmux_name,
+        parse_live_observations,
     };
-
-    #[test]
-    fn old_runtime_names_deserialize_into_the_new_ownership_model() {
-        assert_eq!(
-            serde_json::from_value::<CodexRuntime>(json!("loadedOutsideTmux"))
-                .expect("legacy external runtime should deserialize"),
-            CodexRuntime::ExternalFrontend
-        );
-        assert_eq!(
-            serde_json::from_value::<CodexRuntime>(json!("loadedInTmux"))
-                .expect("legacy tmux runtime should deserialize"),
-            CodexRuntime::TmuxFrontend
-        );
-        assert_eq!(
-            serde_json::to_value(CodexRuntime::ExternalFrontend)
-                .expect("new runtime should serialize"),
-            json!("externalFrontend")
-        );
-    }
+    use serde_json::json;
 
     #[test]
     fn converts_native_threads_to_resumable_sessions() {
-        let session = CodexSession::from(RawThread {
+        let session = Session::from(RawThread {
             id: "019f0000-0000-7000-8000-000000000001".to_owned(),
             cwd: "/fabric".to_owned(),
             name: Some("Rollcall".to_owned()),
@@ -897,21 +786,13 @@ mod tests {
         assert_eq!(session.title, "Rollcall");
         assert_eq!(session.last_interaction_unix_seconds, 200);
         assert_eq!(session.updated_unix_seconds, 250);
-        assert_eq!(session.runtime, CodexRuntime::Resumable);
+        assert_eq!(session.runtime, RuntimeOwner::Resumable);
     }
 
     #[test]
     fn compact_titles_collapse_whitespace_and_truncate() {
         assert_eq!(compact_title("one\n two   three", "/tmp"), "one two three");
         assert!(compact_title(&"x".repeat(100), "/tmp").ends_with('…'));
-    }
-
-    #[test]
-    fn parses_stable_codex_ids() {
-        assert_eq!(
-            parse_session_id("coda:codex:019f").expect("id should parse"),
-            ("coda", "019f")
-        );
     }
 
     #[test]
@@ -958,13 +839,18 @@ mod tests {
         );
 
         let working = &observations["019f"];
-        assert_eq!(working.activity, CodexActivity::Working);
-        assert!(matches!(
-            &working.owner,
-            LiveOwner::Tmux(binding) if binding.session == "agents"
-        ));
-        assert_eq!(observations["019e"].activity, CodexActivity::Completed);
-        assert_eq!(observations["019e"].owner, LiveOwner::SharedBackend);
+        assert_eq!(working.activity, Activity::Working);
+        assert_eq!(working.runtime, RuntimeOwner::TmuxFrontend);
+        assert_eq!(
+            working
+                .tmux
+                .as_ref()
+                .map(|binding| binding.session.as_str()),
+            Some("agents")
+        );
+        assert_eq!(observations["019e"].activity, Activity::Completed);
+        assert_eq!(observations["019e"].runtime, RuntimeOwner::SharedBackend);
+        assert!(observations["019e"].tmux.is_none());
     }
 
     #[test]
@@ -976,9 +862,9 @@ mod tests {
 ",
         );
 
-        assert_eq!(observations["019f"].owner, LiveOwner::SharedBackend);
-        assert_eq!(observations["019e"].owner, LiveOwner::ExternalFrontend);
-        assert!(!matches!(observations["019f"].owner, LiveOwner::Tmux(_)));
+        assert_eq!(observations["019f"].runtime, RuntimeOwner::SharedBackend);
+        assert_eq!(observations["019e"].runtime, RuntimeOwner::ExternalFrontend);
+        assert!(observations["019f"].tmux.is_none());
     }
 
     #[test]
@@ -994,28 +880,27 @@ mod tests {
 ",
         ] {
             let observation = &parse_live_observations(output)["019f"];
-            assert_eq!(observation.activity, CodexActivity::Completed);
-            assert!(matches!(
-                &observation.owner,
-                LiveOwner::Tmux(binding)
-                    if binding.session == "rc-project-deadbeef" && binding.pane == "%3"
-            ));
+            assert_eq!(observation.activity, Activity::Completed);
+            assert_eq!(observation.runtime, RuntimeOwner::TmuxFrontend);
+            assert!(observation.tmux.as_ref().is_some_and(|binding| {
+                binding.session == "rc-project-deadbeef" && binding.pane == "%3"
+            }));
         }
     }
 
     #[test]
     fn live_activity_merge_is_order_independent() {
         assert_eq!(
-            merge_live_activity(CodexActivity::Unknown, CodexActivity::Completed),
-            CodexActivity::Completed
+            merge_live_activity(Activity::Unknown, Activity::Completed),
+            Activity::Completed
         );
         assert_eq!(
-            merge_live_activity(CodexActivity::Completed, CodexActivity::Working),
-            CodexActivity::Working
+            merge_live_activity(Activity::Completed, Activity::Working),
+            Activity::Working
         );
         assert_eq!(
-            merge_live_activity(CodexActivity::Working, CodexActivity::Completed),
-            CodexActivity::Working
+            merge_live_activity(Activity::Working, Activity::Completed),
+            Activity::Working
         );
     }
 
@@ -1032,16 +917,16 @@ mod tests {
     #[test]
     fn live_activity_preserves_attention_until_the_turn_finishes() {
         assert_eq!(
-            merge_observed_activity(CodexActivity::WaitingApproval, CodexActivity::Working),
-            CodexActivity::WaitingApproval
+            crate::domain::merge_observed_activity(Activity::WaitingApproval, Activity::Working),
+            Activity::WaitingApproval
         );
         assert_eq!(
-            merge_observed_activity(CodexActivity::WaitingInput, CodexActivity::Completed),
-            CodexActivity::Completed
+            crate::domain::merge_observed_activity(Activity::WaitingInput, Activity::Completed),
+            Activity::Completed
         );
         assert_eq!(
-            merge_observed_activity(CodexActivity::Completed, CodexActivity::Unknown),
-            CodexActivity::Completed
+            crate::domain::merge_observed_activity(Activity::Completed, Activity::Unknown),
+            Activity::Completed
         );
     }
 }

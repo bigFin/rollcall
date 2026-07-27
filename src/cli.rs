@@ -10,7 +10,8 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::{
-    codex::{self, CodexActivity, CodexError, CodexRuntime},
+    agents::{self, AgentError},
+    domain::{Activity, RuntimeOwner},
     hosts::{self, HostDiscoveryError, SshHost},
     picker::{self, PickerError},
     shell::{self, ShellError},
@@ -133,7 +134,7 @@ enum Command {
 
 #[derive(Debug)]
 enum CliError {
-    Codex(CodexError),
+    Agent(AgentError),
     HostDiscovery(HostDiscoveryError),
     Picker(PickerError),
     Serialization(serde_json::Error),
@@ -145,7 +146,7 @@ enum CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Codex(error) => write!(formatter, "{error}"),
+            Self::Agent(error) => write!(formatter, "{error}"),
             Self::HostDiscovery(error) => write!(formatter, "{error}"),
             Self::Picker(error) => write!(formatter, "{error}"),
             Self::Serialization(error) => write!(formatter, "could not serialize output: {error}"),
@@ -156,9 +157,9 @@ impl fmt::Display for CliError {
     }
 }
 
-impl From<CodexError> for CliError {
-    fn from(error: CodexError) -> Self {
-        Self::Codex(error)
+impl From<AgentError> for CliError {
+    fn from(error: AgentError) -> Self {
+        Self::Agent(error)
     }
 }
 
@@ -358,24 +359,33 @@ fn history_matches(entry: &HistoryEntry, host: Option<&str>, search: Option<&str
 }
 
 fn attach(session: &str) -> Result<(), CliError> {
-    if session.split(':').nth(1) == Some("codex") {
-        codex::attach(session)?;
-    } else {
+    if is_tmux_target(session) {
         tmux::attach(session)?;
+    } else {
+        agents::attach(session)?;
     }
     Store::open()?.acknowledge(session)?;
     Ok(())
 }
 
+fn is_tmux_target(session: &str) -> bool {
+    let fields = session.splitn(3, ':').collect::<Vec<_>>();
+    matches!(fields.as_slice(), [name] if !name.is_empty())
+        || matches!(
+            fields.as_slice(),
+            [host, "tmux", name] if !host.is_empty() && !name.is_empty()
+        )
+}
+
 fn print_sessions(host: &str, limit: Option<usize>, json: bool) -> Result<(), CliError> {
-    let sessions = codex::discover(host, limit)?;
+    let sessions = agents::discover(host, limit)?;
 
     if json {
         return print_json_inventory("sessions", sessions);
     }
 
     if sessions.is_empty() {
-        println!("No resumable Codex sessions were found on {host}.");
+        println!("No resumable coding-agent sessions were found on {host}.");
         return Ok(());
     }
 
@@ -436,23 +446,23 @@ fn print_sessions(host: &str, limit: Option<usize>, json: bool) -> Result<(), Cl
     Ok(())
 }
 
-fn runtime_label(runtime: CodexRuntime) -> &'static str {
+fn runtime_label(runtime: RuntimeOwner) -> &'static str {
     match runtime {
-        CodexRuntime::Resumable => "resumable",
-        CodexRuntime::SharedBackend => "backend",
-        CodexRuntime::ExternalFrontend => "external",
-        CodexRuntime::TmuxFrontend => "tmux",
+        RuntimeOwner::Resumable => "resumable",
+        RuntimeOwner::SharedBackend => "backend",
+        RuntimeOwner::ExternalFrontend => "external",
+        RuntimeOwner::TmuxFrontend => "tmux",
     }
 }
 
-fn activity_label(activity: CodexActivity) -> &'static str {
+fn activity_label(activity: Activity) -> &'static str {
     match activity {
-        CodexActivity::Working => "working",
-        CodexActivity::WaitingApproval => "approval",
-        CodexActivity::WaitingInput => "input",
-        CodexActivity::Completed => "completed",
-        CodexActivity::Failed => "failed",
-        CodexActivity::Unknown => "unknown",
+        Activity::Working => "working",
+        Activity::WaitingApproval => "approval",
+        Activity::WaitingInput => "input",
+        Activity::Completed => "completed",
+        Activity::Failed => "failed",
+        Activity::Unknown => "unknown",
     }
 }
 
@@ -606,10 +616,11 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, Command, activity_label, format_age, history_matches, runtime_label, truncate,
+        Cli, Command, activity_label, format_age, history_matches, is_tmux_target, runtime_label,
+        truncate,
     };
     use crate::{
-        codex::{CodexActivity, CodexRuntime, CodexSession},
+        domain::{Activity, AgentKind, RuntimeOwner, Session},
         store::HistoryEntry,
     };
 
@@ -629,6 +640,14 @@ mod tests {
             Some(Command::Attach { session }) => assert_eq!(session, "topo:codex:019f"),
             _ => panic!("expected attach command"),
         }
+    }
+
+    #[test]
+    fn attach_dispatch_distinguishes_raw_tmux_and_agent_ids() {
+        assert!(is_tmux_target("agents"));
+        assert!(is_tmux_target("topo:tmux:agents"));
+        assert!(!is_tmux_target("topo:codex:019f"));
+        assert!(!is_tmux_target("topo:unknown:019f"));
     }
 
     #[test]
@@ -773,18 +792,18 @@ mod tests {
 
     #[test]
     fn codex_runtime_labels_distinguish_native_loading_state() {
-        assert_eq!(runtime_label(CodexRuntime::Resumable), "resumable");
-        assert_eq!(runtime_label(CodexRuntime::SharedBackend), "backend");
-        assert_eq!(runtime_label(CodexRuntime::ExternalFrontend), "external");
-        assert_eq!(runtime_label(CodexRuntime::TmuxFrontend), "tmux");
+        assert_eq!(runtime_label(RuntimeOwner::Resumable), "resumable");
+        assert_eq!(runtime_label(RuntimeOwner::SharedBackend), "backend");
+        assert_eq!(runtime_label(RuntimeOwner::ExternalFrontend), "external");
+        assert_eq!(runtime_label(RuntimeOwner::TmuxFrontend), "tmux");
     }
 
     #[test]
     fn codex_activity_labels_are_compact() {
-        assert_eq!(activity_label(CodexActivity::Working), "working");
-        assert_eq!(activity_label(CodexActivity::WaitingApproval), "approval");
-        assert_eq!(activity_label(CodexActivity::WaitingInput), "input");
-        assert_eq!(activity_label(CodexActivity::Completed), "completed");
+        assert_eq!(activity_label(Activity::Working), "working");
+        assert_eq!(activity_label(Activity::WaitingApproval), "approval");
+        assert_eq!(activity_label(Activity::WaitingInput), "input");
+        assert_eq!(activity_label(Activity::Completed), "completed");
     }
 
     #[test]
@@ -810,18 +829,19 @@ mod tests {
     #[test]
     fn history_search_matches_all_terms_across_cached_metadata() {
         let entry = HistoryEntry {
-            session: CodexSession {
+            session: Session {
                 id: "topo:codex:019f".to_owned(),
                 host: "topo".to_owned(),
+                agent: AgentKind::Codex,
                 native_session_id: "019f".to_owned(),
                 title: "Rollcall picker".to_owned(),
                 cwd: "/home/fin/projects/rollcall".to_owned(),
                 source: "cli".to_owned(),
-                activity: CodexActivity::Completed,
+                activity: Activity::Completed,
                 last_message: "Ownership boundary is ready.".to_owned(),
                 last_interaction_unix_seconds: 100,
                 updated_unix_seconds: 100,
-                runtime: CodexRuntime::Resumable,
+                runtime: RuntimeOwner::Resumable,
                 tmux: None,
             },
             settled: true,

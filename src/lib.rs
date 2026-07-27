@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod cli;
 pub mod codex;
 pub mod codex_runtime;
