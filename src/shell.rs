@@ -1,6 +1,6 @@
 use std::{fmt, fmt::Write as _};
 
-const DEFAULT_AGENTS: &[&str] = &["codex", "claude", "pi"];
+const DEFAULT_AGENTS: &[&str] = &["codex", "claude", "pi", "omp"];
 
 #[derive(Debug)]
 pub enum ShellError {
@@ -125,6 +125,7 @@ mod tests {
         assert!(script.contains("codex() { _rollcall_agent codex \"$@\"; }"));
         assert!(script.contains("claude() { _rollcall_agent claude \"$@\"; }"));
         assert!(script.contains("pi() { _rollcall_agent pi \"$@\"; }"));
+        assert!(script.contains("omp() { _rollcall_agent omp \"$@\"; }"));
     }
 
     #[test]

@@ -3,12 +3,14 @@ use std::{collections::BTreeMap, fmt};
 use crate::{
     codex::{self, CodexError},
     domain::{AgentKind, LiveObservation, Session, SessionKey},
+    omp::{self, OmpError},
 };
 
 #[derive(Debug)]
 pub enum AgentError {
     InvalidSessionId(String),
     Codex(CodexError),
+    Omp(OmpError),
 }
 
 impl fmt::Display for AgentError {
@@ -19,6 +21,7 @@ impl fmt::Display for AgentError {
                 "invalid coding-agent session {session:?}; expected HOST:AGENT:SESSION_ID"
             ),
             Self::Codex(error) => write!(formatter, "{error}"),
+            Self::Omp(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -28,13 +31,36 @@ impl From<CodexError> for AgentError {
         Self::Codex(error)
     }
 }
+impl From<OmpError> for AgentError {
+    fn from(error: OmpError) -> Self {
+        Self::Omp(error)
+    }
+}
 
 pub fn discover(host: &str, limit: Option<usize>) -> Result<Vec<Session>, AgentError> {
-    codex::discover(host, limit).map_err(Into::into)
+    let codex_result = codex::discover(host, None);
+    let omp_result = omp::discover(host, None);
+    let mut sessions = match codex_result {
+        Ok(sessions) => sessions,
+        Err(_error) if omp_result.is_ok() => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if let Ok(mut omp_sessions) = omp_result {
+        sessions.append(&mut omp_sessions);
+    }
+    sessions.sort_by_key(|session| {
+        std::cmp::Reverse((session.last_interaction_unix_seconds, session.updated_unix_seconds))
+    });
+    if let Some(limit) = limit {
+        sessions.truncate(limit);
+    }
+    Ok(sessions)
 }
 
 pub fn discover_detailed(host: &str, limit: Option<usize>) -> Result<Vec<Session>, AgentError> {
-    codex::discover_detailed(host, limit).map_err(Into::into)
+    let mut sessions = discover(host, limit)?;
+    enrich_details(host, &mut sessions)?;
+    Ok(sessions)
 }
 
 pub fn enrich_details(host: &str, sessions: &mut [Session]) -> Result<(), AgentError> {
@@ -42,28 +68,36 @@ pub fn enrich_details(host: &str, sessions: &mut [Session]) -> Result<(), AgentE
         .iter_mut()
         .filter(|session| session.agent == AgentKind::Codex)
         .collect::<Vec<_>>();
-    if codex_sessions.is_empty() {
-        return Ok(());
-    }
-
-    let mut owned = codex_sessions
-        .iter()
-        .map(|session| (**session).clone())
-        .collect::<Vec<_>>();
-    codex::enrich_details(host, &mut owned)?;
-    for (target, enriched) in codex_sessions.iter_mut().zip(owned) {
-        **target = enriched;
+    if !codex_sessions.is_empty() {
+        let mut owned = codex_sessions
+            .iter()
+            .map(|session| (**session).clone())
+            .collect::<Vec<_>>();
+        codex::enrich_details(host, &mut owned)?;
+        for (target, enriched) in codex_sessions.iter_mut().zip(owned) {
+            **target = enriched;
+        }
     }
     Ok(())
 }
 
 pub fn observe_live(host: &str) -> Result<BTreeMap<String, LiveObservation>, AgentError> {
     let observed_host = observed_host(host);
-    Ok(qualify_live_observations(
-        &observed_host,
-        AgentKind::Codex,
-        codex::observe_live(host)?,
-    ))
+    let codex_result = codex::observe_live(host);
+    let omp_result = omp::observe_live(host);
+    let mut observations = match codex_result {
+        Ok(observations) => qualify_live_observations(&observed_host, AgentKind::Codex, observations),
+        Err(_error) if omp_result.is_ok() => BTreeMap::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if let Ok(omp_observations) = omp_result {
+        observations.extend(qualify_live_observations(
+            &observed_host,
+            AgentKind::Omp,
+            omp_observations,
+        ));
+    }
+    Ok(observations)
 }
 
 fn qualify_live_observations(
@@ -90,6 +124,7 @@ pub fn attach(session_id: &str) -> Result<(), AgentError> {
         .ok_or_else(|| AgentError::InvalidSessionId(session_id.to_owned()))?;
     match key.agent {
         AgentKind::Codex => codex::attach(&key.host, &key.native_session_id).map_err(Into::into),
+        AgentKind::Omp => omp::attach(&key.host, &key.native_session_id).map_err(Into::into),
     }
 }
 

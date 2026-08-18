@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum AgentKind {
     #[default]
     Codex,
+    Omp,
 }
 
 impl AgentKind {
@@ -12,6 +13,7 @@ impl AgentKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
+            Self::Omp => "omp",
         }
     }
 
@@ -19,6 +21,7 @@ impl AgentKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "codex" => Some(Self::Codex),
+            "omp" | "pi" => Some(Self::Omp),
             _ => None,
         }
     }

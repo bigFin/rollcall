@@ -104,7 +104,7 @@ enum Command {
 
     /// Print Bash/Zsh wrappers that transparently launch agents inside tmux
     ShellInit {
-        /// Agent command names to wrap; defaults to codex, claude, and pi
+        /// Agent command names to wrap; defaults to codex, claude, pi, and omp
         #[arg(value_name = "AGENT")]
         agents: Vec<String>,
     },

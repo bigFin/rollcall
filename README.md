@@ -24,11 +24,12 @@ nickname, but `rollcall` is the command.
 
 ## Status
 
-The first Codex-first slice works. Rollcall discovers resumable Codex threads
-across the local machine and configured SSH hosts, sorts them by native
-interaction recency, distinguishes attachable tmux frontends from external
-frontends and its own backend, and hands the terminal back to the exact tmux
-pane or to `codex resume`.
+The first Codex-first slice works. Rollcall discovers resumable Codex and
+Oh My Pi sessions across the local machine and configured SSH hosts, sorts them
+by native interaction recency, distinguishes attachable tmux frontends from
+external frontends and its own backend, and hands the terminal back to the
+exact tmux pane or to the native resume command (`codex resume` or
+`omp --resume`).
 
 The picker opens immediately from its SQLite snapshot, then refreshes each
 unique SSH endpoint through a bounded scheduler. Basic session rows arrive
@@ -39,12 +40,10 @@ automatic settling, offline cached sessions, and on-demand session previews are
 implemented. Meaningful lifecycle transitions also create persistent unread
 attention and local notifications while Rollcall is running.
 
-Codex inventory and resumed TUIs now converge on one lazily started app-server
-per host and `CODEX_HOME`. The persisted session model and control-plane
-dispatch boundary are harness-neutral, but Codex remains the only implemented
-adapter today. Additional coding-agent adapters, background observation while
-every Rollcall process is closed, configurable stale-after rules, and the
-optional local broker remain ahead.
+Codex and OMP inventory and resumed TUIs converge on the same harness-neutral
+session model and control-plane dispatcher. Additional coding-agent adapters,
+background observation while every Rollcall process is closed, configurable
+stale-after rules, and the optional local broker remain ahead.
 
 ## Product Boundary
 

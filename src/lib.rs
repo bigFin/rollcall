@@ -2,6 +2,7 @@ pub mod agents;
 pub mod cli;
 pub mod codex;
 pub mod codex_runtime;
+pub mod omp;
 pub mod domain;
 pub mod hosts;
 mod notify;
