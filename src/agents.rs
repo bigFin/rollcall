@@ -38,8 +38,12 @@ impl From<OmpError> for AgentError {
 }
 
 pub fn discover(host: &str, limit: Option<usize>) -> Result<Vec<Session>, AgentError> {
-    let codex_result = codex::discover(host, None);
-    let omp_result = omp::discover(host, None);
+    let codex_result = match codex::available(host) {
+        Ok(true) => codex::discover(host, limit),
+        Ok(false) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    };
+    let omp_result = omp::discover(host, limit);
     let mut sessions = match codex_result {
         Ok(sessions) => sessions,
         Err(_error) if omp_result.is_ok() => Vec::new(),
@@ -48,9 +52,6 @@ pub fn discover(host: &str, limit: Option<usize>) -> Result<Vec<Session>, AgentE
     if let Ok(mut omp_sessions) = omp_result {
         sessions.append(&mut omp_sessions);
     }
-    sessions.sort_by_key(|session| {
-        std::cmp::Reverse((session.last_interaction_unix_seconds, session.updated_unix_seconds))
-    });
     if let Some(limit) = limit {
         sessions.truncate(limit);
     }

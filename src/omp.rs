@@ -13,14 +13,26 @@ use crate::tmux;
 const SESSION_SCRIPT: &str = r#"
 root="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions"
 [ -d "$root" ] || exit 0
-find "$root" -type f -name '*.jsonl' -print0 2>/dev/null |
-while IFS= read -r -d '' file; do
-  mtime=$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null || printf '0')
-  printf 'FILE\t%s\t%s\n' "$mtime" "$file"
-  sed -n '1,3p' "$file" 2>/dev/null
-  tail -n 128 "$file" 2>/dev/null
-  printf 'END\n'
-done
+if [ -n "${ROLLCALL_SESSION_LIMIT:-}" ]; then
+  find "$root" -type f -name '*.jsonl' -printf '%T@\t%p\n' 2>/dev/null |
+    sort -nr |
+    sed -n "1,${ROLLCALL_SESSION_LIMIT}p" |
+    cut -f2- |
+    while IFS= read -r file; do
+      mtime=$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null || printf '0')
+      printf 'FILE\t%s\t%s\n' "$mtime" "$file"
+      sed -n '1,3p' "$file" 2>/dev/null
+      printf 'END\n'
+    done
+else
+  find "$root" -type f -name '*.jsonl' -print0 2>/dev/null |
+  while IFS= read -r -d '' file; do
+    mtime=$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null || printf '0')
+    printf 'FILE\t%s\t%s\n' "$mtime" "$file"
+    sed -n '1,3p' "$file" 2>/dev/null
+    printf 'END\n'
+  done
+fi
 "#;
 
 const LIVE_SCRIPT: &str = r#"
@@ -92,9 +104,11 @@ impl fmt::Display for OmpError {
 impl From<serde_json::Error> for OmpError { fn from(error: serde_json::Error) -> Self { Self::Json(error) } }
 impl From<std::io::Error> for OmpError { fn from(error: std::io::Error) -> Self { Self::Io(error) } }
 impl From<tmux::TmuxError> for OmpError { fn from(error: tmux::TmuxError) -> Self { Self::Tmux(error) } }
-
 pub fn discover(host: &str, limit: Option<usize>) -> Result<Vec<Session>, OmpError> {
-    let output = run(host, SESSION_SCRIPT)?;
+    let script = limit
+        .map(|limit| format!("ROLLCALL_SESSION_LIMIT={limit} {SESSION_SCRIPT}"))
+        .unwrap_or_else(|| SESSION_SCRIPT.to_owned());
+    let output = run(host, &script)?;
     let mut sessions = parse_sessions(&output)?;
     correlate_live(host, &mut sessions)?;
     sessions.sort_by_key(|session| std::cmp::Reverse((session.last_interaction_unix_seconds, session.updated_unix_seconds)));

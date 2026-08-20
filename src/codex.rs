@@ -354,6 +354,40 @@ pub(crate) fn observed_host(host: &str) -> String {
         host.to_owned()
     }
 }
+pub(crate) fn available(host: &str) -> Result<bool, CodexError> {
+    let command = "command -v codex >/dev/null 2>&1";
+    let output = if host == "local" || host == local_hostname() {
+        Command::new("bash")
+            .args(["-c", command])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|source| CodexError::Start {
+                program: "bash",
+                source,
+            })?
+    } else {
+        let remote_command = shlex::try_join(["bash", "-c", command])?;
+        Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "ConnectionAttempts=1",
+                "--",
+                host,
+                &remote_command,
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|source| CodexError::Start {
+                program: "ssh",
+                source,
+            })?
+    };
+    Ok(output.status.success())
+}
 
 fn local_hostname() -> String {
     env::var("HOSTNAME")
