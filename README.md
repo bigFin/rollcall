@@ -104,6 +104,8 @@ enter          attach or resume
 p              preview the live tmux pane or cached response
 /              filter visible sessions
 h              select an SSH host
+[ / ]          previous / next host scope
+0              show all hosts
 tab            switch Active/Settled views
 a              settle or restore the selected session
 x              mark the selected session read

@@ -481,6 +481,9 @@ impl PickerApp {
             KeyCode::Char('r') => Action::Refresh,
             KeyCode::Char('a') => self.archive_action(false),
             KeyCode::Char('x') => self.acknowledge_action(),
+            KeyCode::Char('0') => Action::SetHostFilter(ALL_HOSTS.to_owned()),
+            KeyCode::Char('[') => self.cycle_host_filter(-1),
+            KeyCode::Char(']') => self.cycle_host_filter(1),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.status = None;
                 self.select_next();
@@ -799,6 +802,27 @@ impl PickerApp {
             self.request_host_now(&target);
         }
         self.rebuild_rows();
+    }
+    fn cycle_host_filter(&mut self, direction: isize) -> Action {
+        if self.host_choices.is_empty() {
+            return Action::None;
+        }
+        let current = self
+            .host_choices
+            .iter()
+            .position(|host| host == &self.host_filter)
+            .unwrap_or_default();
+        let length = self.host_choices.len();
+        let next = if direction.is_negative() {
+            current.saturating_sub(direction.unsigned_abs())
+        } else {
+            current.saturating_add(direction as usize)
+        }
+        .min(length.saturating_sub(1));
+        self.host_choices
+            .get(next)
+            .cloned()
+            .map_or(Action::None, Action::SetHostFilter)
     }
 
     fn start_refresh(&mut self) {
@@ -2386,7 +2410,6 @@ fn wrap_preview_body(body: &str, width: usize) -> Vec<String> {
     }
     wrapped
 }
-
 fn preview_window(lines: &[String], height: usize, scroll_from_bottom: usize) -> String {
     if lines.is_empty() {
         return String::new();
@@ -2399,16 +2422,20 @@ fn preview_window(lines: &[String], height: usize, scroll_from_bottom: usize) ->
 }
 
 fn draw_hosts(frame: &mut Frame<'_>, app: &PickerApp) {
-    let area = centered_rect(54, 70, frame.area());
+    let area = centered_rect(62, 70, frame.area());
     frame.render_widget(Clear, area);
     let items = app
         .host_choices
         .iter()
         .map(|host| {
-            let current = if host == &app.host_filter {
-                "  current"
+            let current = if host == &app.host_filter { "  current" } else { "" };
+            let (active, settled) = if host == ALL_HOSTS {
+                (app.active.len(), app.settled.len())
             } else {
-                ""
+                (
+                    app.active.iter().filter(|session| session.host == *host).count(),
+                    app.settled.iter().filter(|session| session.host == *host).count(),
+                )
             };
             let state = app
                 .target_for_observed_host(host)
@@ -2420,7 +2447,9 @@ fn draw_hosts(frame: &mut Frame<'_>, app: &PickerApp) {
                 Some(HostPhase::Blocked) => "  blocked",
                 Some(HostPhase::Cached | HostPhase::Online) | None => "",
             };
-            ListItem::new(format!("{host}{current}{connectivity}"))
+            ListItem::new(format!(
+                "{host:<24} {active} active · {settled} settled{current}{connectivity}"
+            ))
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
@@ -2564,6 +2593,21 @@ mod tests {
             app.status
                 .as_deref()
                 .is_some_and(|status| status.contains("close or release"))
+        );
+    }
+
+    #[test]
+    fn quick_host_scope_keys_cycle_and_reset_the_filter() {
+        let mut app = app_with_sessions(vec![session("019f", "/fabric", "Topo")], Vec::new());
+        app.host_choices = vec!["all".to_owned(), "coda".to_owned(), "topo".to_owned()];
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE)),
+            Action::SetHostFilter("coda".to_owned())
+        );
+        app.set_host_filter("coda".to_owned());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE)),
+            Action::SetHostFilter("all".to_owned())
         );
     }
 
