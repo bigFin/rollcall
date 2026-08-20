@@ -280,6 +280,88 @@ pub fn resume_codex(
     }
 }
 
+pub fn resume_command(
+    host: &str,
+    session_name: &str,
+    cwd: &str,
+    command: &str,
+) -> Result<(), TmuxError> {
+    let target = TmuxTarget {
+        host: host.to_owned(),
+        name: session_name.to_owned(),
+    };
+    let (program, arguments) = resume_command_args(
+        &target,
+        cwd,
+        command,
+        env::var_os("TMUX").is_some(),
+        &local_hostname(),
+    )?;
+    let status = Command::new(program)
+        .args(&arguments)
+        .status()
+        .map_err(|source| TmuxError::Start { program, source })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(TmuxError::CommandFailed {
+            context: format!("resuming session in {}", target.id()),
+            message: status.to_string(),
+        })
+    }
+}
+
+fn resume_command_args(
+    target: &TmuxTarget,
+    cwd: &str,
+    command: &str,
+    inside_tmux: bool,
+    local_hostname: &str,
+) -> Result<(&'static str, Vec<String>), TmuxError> {
+    let login_command = shlex::try_join(["exec", "bash", "-lc", command].iter().copied())?;
+    if target.host == "local" || target.host == local_hostname {
+        let detached = if inside_tmux { "-Ad" } else { "-A" };
+        let mut arguments = vec![
+            "new-session".to_owned(),
+            detached.to_owned(),
+            "-s".to_owned(),
+            target.name.to_owned(),
+            "-c".to_owned(),
+            cwd.to_owned(),
+            login_command,
+        ];
+        if inside_tmux {
+            arguments.extend([
+                ";".to_owned(),
+                "switch-client".to_owned(),
+                "-t".to_owned(),
+                target.name.to_owned(),
+            ]);
+        }
+        return Ok(("tmux", arguments));
+    }
+
+    let remote_command = shlex::try_join([
+        "tmux",
+        "new-session",
+        "-A",
+        "-s",
+        &target.name,
+        "-c",
+        cwd,
+        &login_command,
+    ])?;
+    Ok((
+        "ssh",
+        vec![
+            "-t".to_owned(),
+            "--".to_owned(),
+            target.host.to_owned(),
+            remote_command,
+        ],
+    ))
+}
+
 fn is_missing_tmux_server(message: &str) -> bool {
     message.contains("no server running")
         || message.contains("failed to connect to server")

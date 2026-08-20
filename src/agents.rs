@@ -128,6 +128,15 @@ pub fn attach(session_id: &str) -> Result<(), AgentError> {
     }
 }
 
+pub fn resume(session_id: &str) -> Result<(), AgentError> {
+    let key = SessionKey::parse(session_id)
+        .ok_or_else(|| AgentError::InvalidSessionId(session_id.to_owned()))?;
+    match key.agent {
+        AgentKind::Codex => codex::resume(&key.host, &key.native_session_id).map_err(Into::into),
+        AgentKind::Omp => omp::resume(&key.host, &key.native_session_id).map_err(Into::into),
+    }
+}
+
 #[must_use]
 pub fn observed_host(host: &str) -> String {
     codex::observed_host(host)

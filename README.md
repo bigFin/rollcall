@@ -74,10 +74,17 @@ rollcall list [--host HOST] [--limit N | --all]
 rollcall history [--host HOST] [--search QUERY] [--limit N]
 rollcall hosts [--config PATH]
 rollcall attach <session>
+rollcall resume <session>
 rollcall watch [--host HOST] [--limit N] [--once]
 rollcall shell-init [AGENT...]
 rollcall tmux [--host HOST]
 ```
+
+`attach` preserves ownership safety: it attaches an existing Rollcall-managed
+tmux frontend, or resumes a session that has no active frontend. It refuses to
+take over a session owned by another external frontend. `resume` is the
+explicit escape hatch: it starts a new Rollcall-managed tmux frontend and
+resumes the native session, even when another frontend is currently active.
 
 Running `rollcall` interactively opens the picker. When stdout is redirected, or
 when `--json` is supplied, the no-subcommand form retains the scriptable list

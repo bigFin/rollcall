@@ -61,6 +61,25 @@ attention: none | completed | approval | input | plan-ready
 This permits a session to be working while awaiting approval, offline with an
 unseen completion, or idle without requiring attention.
 
+## Ownership-Safe Actions
+
+Rollcall never treats an arbitrary harness process as attachable. A process
+outside tmux owns its PTY, and injecting another client into that PTY is not a
+portable or safe control path.
+
+Action selection follows ownership:
+
+```text
+tmux frontend       -> attach the exact pane
+no frontend         -> start a managed tmux frontend and resume
+external frontend   -> refuse implicit takeover
+explicit `resume`   -> start a second managed frontend deliberately
+```
+
+Harness server protocols remain adapter-specific observation and control
+backends. They may improve listing, detail reads, or safe resume semantics, but
+they do not turn an interactive external PTY into an attach target by default.
+
 ## Observation Strategy
 
 Efficient observation follows one rule:

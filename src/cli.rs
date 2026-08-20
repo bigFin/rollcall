@@ -101,6 +101,11 @@ enum Command {
         /// Stable control-plane session identifier
         session: String,
     },
+    /// Start a new managed frontend and resume a discovered session
+    Resume {
+        /// Stable control-plane session identifier
+        session: String,
+    },
 
     /// Print Bash/Zsh wrappers that transparently launch agents inside tmux
     ShellInit {
@@ -248,6 +253,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Popup { host, limit } => picker::popup(&host, limit).map_err(Into::into),
         Command::Hosts { config } => print_hosts(config.as_deref(), cli.json),
         Command::Attach { session } => attach(&session),
+        Command::Resume { session } => resume(&session),
         Command::ShellInit { agents } => {
             print!("{}", shell::render(&agents)?);
             Ok(())
@@ -356,6 +362,12 @@ fn history_matches(entry: &HistoryEntry, host: Option<&str>, search: Option<&str
     search
         .split_whitespace()
         .all(|term| corpus.contains(&term.to_lowercase()))
+}
+
+fn resume(session: &str) -> Result<(), CliError> {
+    agents::resume(session)?;
+    Store::open()?.acknowledge(session)?;
+    Ok(())
 }
 
 fn attach(session: &str) -> Result<(), CliError> {
@@ -640,6 +652,16 @@ mod tests {
             Some(Command::Attach { session }) => assert_eq!(session, "topo:codex:019f"),
             _ => panic!("expected attach command"),
         }
+    }
+
+    #[test]
+    fn resume_is_an_explicit_new_frontend_action() {
+        let cli = Cli::try_parse_from(["rollcall", "resume", "topo:omp:019f"])
+            .expect("resume should parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Resume { session }) if session == "topo:omp:019f"
+        ));
     }
 
     #[test]

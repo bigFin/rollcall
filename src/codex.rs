@@ -276,18 +276,34 @@ pub fn attach(host: &str, native_id: &str) -> Result<(), CodexError> {
             Ok(())
         }
         (RuntimeOwner::ExternalFrontend, _) => Err(CodexError::ExternalFrontend(session.id)),
-        _ => {
-            let app_server_socket = codex_runtime::ensure(host)?;
-            tmux::resume_codex(
-                &session.host,
-                &deterministic_tmux_name(&session.cwd, &session.native_session_id),
-                &session.cwd,
-                &session.native_session_id,
-                &app_server_socket,
-            )
-            .map_err(Into::into)
-        }
+        _ => resume_session(host, &session),
     }
+}
+
+pub fn resume(host: &str, native_id: &str) -> Result<(), CodexError> {
+    let session_id = SessionKey {
+        host: observed_host(host),
+        agent: AgentKind::Codex,
+        native_session_id: native_id.to_owned(),
+    }
+    .stable_id();
+    let session = discover(host, None)?
+        .into_iter()
+        .find(|session| session.native_session_id == native_id)
+        .ok_or_else(|| CodexError::MissingSession(session_id))?;
+    resume_session(host, &session)
+}
+
+fn resume_session(host: &str, session: &Session) -> Result<(), CodexError> {
+    let app_server_socket = codex_runtime::ensure(host)?;
+    tmux::resume_codex(
+        &session.host,
+        &deterministic_tmux_name(&session.cwd, &session.native_session_id),
+        &session.cwd,
+        &session.native_session_id,
+        &app_server_socket,
+    )
+    .map_err(Into::into)
 }
 
 fn deterministic_tmux_name(cwd: &str, native_id: &str) -> String {

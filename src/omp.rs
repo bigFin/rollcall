@@ -70,16 +70,17 @@ done
 
 #[derive(Debug)]
 pub enum OmpError {
+    ExternalFrontend(String),
     Start { program: &'static str, source: std::io::Error },
     CommandFailed(String),
     Json(serde_json::Error),
     Io(std::io::Error),
     Tmux(tmux::TmuxError),
 }
-
 impl fmt::Display for OmpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ExternalFrontend(session) => write!(f, "OMP session {session} is owned by an external frontend; use `rollcall resume` only when a second frontend is intentional"),
             Self::Start { program, source } => write!(f, "could not start {program}: {source}"),
             Self::CommandFailed(message) => write!(f, "OMP command failed: {message}"),
             Self::Json(error) => write!(f, "OMP session contained invalid JSON: {error}"),
@@ -88,7 +89,6 @@ impl fmt::Display for OmpError {
         }
     }
 }
-
 impl From<serde_json::Error> for OmpError { fn from(error: serde_json::Error) -> Self { Self::Json(error) } }
 impl From<std::io::Error> for OmpError { fn from(error: std::io::Error) -> Self { Self::Io(error) } }
 impl From<tmux::TmuxError> for OmpError { fn from(error: tmux::TmuxError) -> Self { Self::Tmux(error) } }
@@ -108,14 +108,55 @@ pub fn observe_live(host: &str) -> Result<BTreeMap<String, LiveObservation>, Omp
 }
 
 pub fn attach(host: &str, native_id: &str) -> Result<(), OmpError> {
-    let command = format!("omp --resume {}", shlex::try_join(["omp", "--resume", native_id].iter().copied()).map_err(|error| OmpError::CommandFailed(error.to_string()))?);
-    let output = if is_local(host) {
-        Command::new("bash").args(["-lc", &command]).stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status().map_err(|source| OmpError::Start { program: "omp", source })?
-    } else {
-        let remote = shlex::try_join(["bash", "-lc", &command].iter().copied()).map_err(|error| OmpError::CommandFailed(error.to_string()))?;
-        Command::new("ssh").args(["-t", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", host, &remote]).stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status().map_err(|source| OmpError::Start { program: "ssh", source })?
-    };
-    if output.success() { Ok(()) } else { Err(OmpError::CommandFailed(output.to_string())) }
+    let session = discover(host, None)?
+        .into_iter()
+        .find(|session| session.native_session_id == native_id)
+        .ok_or_else(|| OmpError::CommandFailed(format!("OMP session {native_id} was not found")))?;
+    match session.runtime {
+        RuntimeOwner::TmuxFrontend => session
+            .tmux
+            .as_ref()
+            .ok_or_else(|| OmpError::CommandFailed("OMP tmux frontend had no binding".to_owned()))
+            .and_then(|binding| tmux::attach_pane(&session.host, &binding.session, &binding.pane).map_err(Into::into)),
+        RuntimeOwner::ExternalFrontend => Err(OmpError::ExternalFrontend(session.id)),
+        _ => resume_session(&session),
+    }
+}
+
+pub fn resume(host: &str, native_id: &str) -> Result<(), OmpError> {
+    let session = discover(host, None)?
+        .into_iter()
+        .find(|session| session.native_session_id == native_id)
+        .ok_or_else(|| OmpError::CommandFailed(format!("OMP session {native_id} was not found")))?;
+    resume_session(&session)
+}
+
+fn resume_session(session: &Session) -> Result<(), OmpError> {
+    let command = shlex::try_join(["omp", "--resume", &session.native_session_id].iter().copied())
+        .map_err(|error| OmpError::CommandFailed(error.to_string()))?;
+    tmux::resume_command(
+        &session.host,
+        &deterministic_tmux_name(&session.cwd, &session.native_session_id),
+        &session.cwd,
+        &command,
+    )?;
+    Ok(())
+}
+
+fn deterministic_tmux_name(cwd: &str, native_id: &str) -> String {
+    let project = cwd
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("session");
+    let suffix = native_id
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("rc-omp-{}-{}", project.replace(|c: char| !c.is_ascii_alphanumeric(), "-"), suffix)
 }
 
 fn run(host: &str, script: &str) -> Result<String, OmpError> {
