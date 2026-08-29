@@ -39,6 +39,8 @@ const REMOTE_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_HOST_REFRESHES: usize = 4;
 const NOTICE_DURATION: Duration = Duration::from_secs(8);
 const PREVIEW_CAPTURE_LINES: usize = 120;
+const DAY_SECONDS: u64 = 24 * 60 * 60;
+const WEEK_SECONDS: u64 = 7 * DAY_SECONDS;
 
 #[derive(Debug)]
 pub enum PickerError {
@@ -224,6 +226,33 @@ fn event_loop(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DashboardSection {
+    Current,
+    LastDay,
+    LastWeek,
+    Archive,
+}
+
+impl DashboardSection {
+    const ALL: [Self; 4] = [Self::Current, Self::LastDay, Self::LastWeek, Self::Archive];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Current => "Currently active",
+            Self::LastDay => "Last day",
+            Self::LastWeek => "Last week",
+            Self::Archive => "Archive",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionRef {
+    Active(usize),
+    Settled(usize),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputMode {
     Browse,
@@ -233,10 +262,25 @@ enum InputMode {
     Preview,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DashboardView {
-    Active,
-    Settled,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DashboardRow {
+    Section {
+        section: DashboardSection,
+        count: usize,
+        expanded: bool,
+    },
+    Host {
+        host: String,
+        count: usize,
+        fresh: bool,
+    },
+    Group {
+        cwd: String,
+        host: String,
+        count: usize,
+        fresh: bool,
+    },
+    Session(SessionRef),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,17 +290,6 @@ enum GroupConnectivity {
     Offline(Option<u64>),
     Blocked,
     Cached,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum DashboardRow {
-    Group {
-        cwd: String,
-        host: String,
-        count: usize,
-        fresh: bool,
-    },
-    Session(usize),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -333,7 +366,7 @@ struct PickerApp {
     query: String,
     selected_row: usize,
     input_mode: InputMode,
-    view: DashboardView,
+    expanded_sections: BTreeSet<DashboardSection>,
     show_details: bool,
     host_filter: String,
     host_choices: Vec<String>,
@@ -397,12 +430,16 @@ impl PickerApp {
         let mut app = Self {
             store,
             active: Vec::new(),
-            settled: Vec::new(),
             rows: Vec::new(),
             query: String::new(),
+            settled: Vec::new(),
             selected_row: 0,
             input_mode: InputMode::Browse,
-            view: DashboardView::Active,
+            expanded_sections: BTreeSet::from([
+                DashboardSection::Current,
+                DashboardSection::LastDay,
+                DashboardSection::LastWeek,
+            ]),
             show_details: false,
             host_filter,
             host_choices: vec![ALL_HOSTS.to_owned()],
@@ -474,8 +511,8 @@ impl PickerApp {
                 self.start_preview();
                 Action::None
             }
-            KeyCode::Tab => {
-                self.toggle_view();
+            KeyCode::Tab | KeyCode::Char(' ') => {
+                self.toggle_selected_section();
                 Action::None
             }
             KeyCode::Char('r') => Action::Refresh,
@@ -648,6 +685,10 @@ impl PickerApp {
     }
 
     fn selected_action(&mut self) -> Action {
+        if self.selected_section().is_some() {
+            self.toggle_selected_section();
+            return Action::None;
+        }
         let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
             return Action::None;
         };
@@ -765,9 +806,13 @@ impl PickerApp {
 
     fn archive_action(&self, attach: bool) -> Action {
         self.selected_session()
-            .map_or(Action::None, |session| Action::SetArchived {
+            .and_then(|session| {
+                self.archived_state_for_session(&session.id)
+                    .map(|archived| (session, archived))
+            })
+            .map_or(Action::None, |(session, archived)| Action::SetArchived {
                 session_id: session.id.clone(),
-                archived: self.view == DashboardView::Active,
+                archived: !archived,
                 attach,
             })
     }
@@ -778,11 +823,21 @@ impl PickerApp {
             .unwrap_or(Action::None)
     }
 
-    fn toggle_view(&mut self) {
-        self.view = match self.view {
-            DashboardView::Active => DashboardView::Settled,
-            DashboardView::Settled => DashboardView::Active,
+    fn toggle_selected_section(&mut self) {
+        let Some(section) = self.selected_section().or_else(|| {
+            self.rows[..self.selected_row.min(self.rows.len())]
+                .iter()
+                .rev()
+                .find_map(|row| match row {
+                    DashboardRow::Section { section, .. } => Some(*section),
+                    _ => None,
+                })
+        }) else {
+            return;
         };
+        if !self.expanded_sections.remove(&section) {
+            self.expanded_sections.insert(section);
+        }
         self.status = None;
         self.rebuild_rows();
     }
@@ -1420,110 +1475,186 @@ impl PickerApp {
 
     fn rebuild_rows_selecting(&mut self, selected_session_id: Option<&str>) {
         let query = self.query.to_lowercase();
-        let sessions = self.current_sessions();
-        let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-        for (index, session) in sessions.iter().enumerate() {
+        let now = unix_now_seconds();
+        let mut sections: BTreeMap<DashboardSection, Vec<SessionRef>> = BTreeMap::new();
+
+        for (index, session) in self.active.iter().enumerate() {
             if (self.host_filter == ALL_HOSTS || session.host == self.host_filter)
                 && session_matches(session, &query)
             {
-                groups
-                    .entry((session.cwd.clone(), session.host.clone()))
+                sections
+                    .entry(dashboard_section(
+                        session,
+                        false,
+                        self.unread_ids.contains(&session.id),
+                        now,
+                    ))
                     .or_default()
-                    .push(index);
+                    .push(SessionRef::Active(index));
+            }
+        }
+        for (index, session) in self.settled.iter().enumerate() {
+            if (self.host_filter == ALL_HOSTS || session.host == self.host_filter)
+                && session_matches(session, &query)
+            {
+                sections
+                    .entry(dashboard_section(
+                        session,
+                        true,
+                        self.unread_ids.contains(&session.id),
+                        now,
+                    ))
+                    .or_default()
+                    .push(SessionRef::Settled(index));
             }
         }
 
-        let mut groups = groups.into_iter().collect::<Vec<_>>();
-        groups.sort_by(|left, right| {
-            let left_unread = left
-                .1
-                .iter()
-                .any(|index| self.unread_ids.contains(&sessions[*index].id));
-            let right_unread = right
-                .1
-                .iter()
-                .any(|index| self.unread_ids.contains(&sessions[*index].id));
-            let left_priority = left
-                .1
-                .iter()
-                .map(|index| activity_priority(sessions[*index].activity))
-                .min()
-                .unwrap_or(u8::MAX);
-            let right_priority = right
-                .1
-                .iter()
-                .map(|index| activity_priority(sessions[*index].activity))
-                .min()
-                .unwrap_or(u8::MAX);
-            let left_recency = left
-                .1
-                .iter()
-                .map(|index| sessions[*index].last_interaction_unix_seconds)
-                .max()
-                .unwrap_or_default();
-            let right_recency = right
-                .1
-                .iter()
-                .map(|index| sessions[*index].last_interaction_unix_seconds)
-                .max()
-                .unwrap_or_default();
-            right_unread
-                .cmp(&left_unread)
-                .then_with(|| left_priority.cmp(&right_priority))
-                .then_with(|| right_recency.cmp(&left_recency))
-                .then(left.0.cmp(&right.0))
-        });
-
         let mut rows = Vec::new();
-        for ((cwd, host), mut indices) in groups {
-            indices.sort_by_key(|index| {
-                (
-                    !self.unread_ids.contains(&sessions[*index].id),
-                    activity_priority(sessions[*index].activity),
-                    std::cmp::Reverse(sessions[*index].last_interaction_unix_seconds),
-                )
+        for section in DashboardSection::ALL {
+            let sessions = sections.remove(&section).unwrap_or_default();
+            rows.push(DashboardRow::Section {
+                section,
+                count: sessions.len(),
+                expanded: self.expanded_sections.contains(&section),
             });
-            let fresh = indices
-                .iter()
-                .any(|index| self.fresh_ids.contains(&sessions[*index].id));
-            rows.push(DashboardRow::Group {
-                cwd,
-                host,
-                count: indices.len(),
-                fresh,
+            if !self.expanded_sections.contains(&section) {
+                continue;
+            }
+
+            let mut hosts: BTreeMap<String, Vec<SessionRef>> = BTreeMap::new();
+            for session_ref in sessions {
+                hosts
+                    .entry(self.session_for_ref(session_ref).host.clone())
+                    .or_default()
+                    .push(session_ref);
+            }
+            let mut hosts = hosts.into_iter().collect::<Vec<_>>();
+            hosts.sort_by(|left, right| {
+                self.compare_session_groups(&left.1, &right.1)
+                    .then(left.0.cmp(&right.0))
             });
-            rows.extend(indices.into_iter().map(DashboardRow::Session));
+
+            for (host, sessions) in hosts {
+                let fresh = sessions
+                    .iter()
+                    .any(|session_ref| self.fresh_ids.contains(&self.session_for_ref(*session_ref).id));
+                rows.push(DashboardRow::Host {
+                    host: host.clone(),
+                    count: sessions.len(),
+                    fresh,
+                });
+
+                let mut projects: BTreeMap<String, Vec<SessionRef>> = BTreeMap::new();
+                for session_ref in sessions {
+                    projects
+                        .entry(self.session_for_ref(session_ref).cwd.clone())
+                        .or_default()
+                        .push(session_ref);
+                }
+                let mut projects = projects.into_iter().collect::<Vec<_>>();
+                projects.sort_by(|left, right| {
+                    self.compare_session_groups(&left.1, &right.1)
+                        .then(left.0.cmp(&right.0))
+                });
+
+                for (cwd, mut sessions) in projects {
+                    sessions.sort_by_key(|session_ref| {
+                        let session = self.session_for_ref(*session_ref);
+                        (
+                            !self.unread_ids.contains(&session.id),
+                            activity_priority(session.activity),
+                            std::cmp::Reverse(session.last_interaction_unix_seconds),
+                        )
+                    });
+                    let fresh = sessions
+                        .iter()
+                        .any(|session_ref| self.fresh_ids.contains(&self.session_for_ref(*session_ref).id));
+                    rows.push(DashboardRow::Group {
+                        cwd,
+                        host: host.clone(),
+                        count: sessions.len(),
+                        fresh,
+                    });
+                    rows.extend(sessions.into_iter().map(DashboardRow::Session));
+                }
+            }
         }
+
         self.rows = rows;
         self.selected_row = selected_session_id
             .and_then(|selected_id| {
                 self.rows.iter().position(|row| {
-                    let DashboardRow::Session(index) = row else {
+                    let DashboardRow::Session(session_ref) = row else {
                         return false;
                     };
-                    self.current_sessions()[*index].id == selected_id
+                    self.session_for_ref(*session_ref).id == selected_id
                 })
             })
             .unwrap_or_else(|| {
                 self.rows
                     .iter()
                     .position(|row| matches!(row, DashboardRow::Session(_)))
+                    .or_else(|| self.rows.iter().position(is_navigable_row))
                     .unwrap_or_default()
             });
     }
 
-    fn current_sessions(&self) -> &[Session] {
-        match self.view {
-            DashboardView::Active => &self.active,
-            DashboardView::Settled => &self.settled,
+    fn compare_session_groups(
+        &self,
+        left: &[SessionRef],
+        right: &[SessionRef],
+    ) -> std::cmp::Ordering {
+        let left_unread = left
+            .iter()
+            .any(|session_ref| self.unread_ids.contains(&self.session_for_ref(*session_ref).id));
+        let right_unread = right
+            .iter()
+            .any(|session_ref| self.unread_ids.contains(&self.session_for_ref(*session_ref).id));
+        let left_priority = left
+            .iter()
+            .map(|session_ref| activity_priority(self.session_for_ref(*session_ref).activity))
+            .min()
+            .unwrap_or(u8::MAX);
+        let right_priority = right
+            .iter()
+            .map(|session_ref| activity_priority(self.session_for_ref(*session_ref).activity))
+            .min()
+            .unwrap_or(u8::MAX);
+        let left_recency = left
+            .iter()
+            .map(|session_ref| self.session_for_ref(*session_ref).last_interaction_unix_seconds)
+            .max()
+            .unwrap_or_default();
+        let right_recency = right
+            .iter()
+            .map(|session_ref| self.session_for_ref(*session_ref).last_interaction_unix_seconds)
+            .max()
+            .unwrap_or_default();
+        right_unread
+            .cmp(&left_unread)
+            .then_with(|| left_priority.cmp(&right_priority))
+            .then_with(|| right_recency.cmp(&left_recency))
+    }
+
+    fn session_for_ref(&self, session_ref: SessionRef) -> &Session {
+        match session_ref {
+            SessionRef::Active(index) => &self.active[index],
+            SessionRef::Settled(index) => &self.settled[index],
+        }
+    }
+
+    fn selected_section(&self) -> Option<DashboardSection> {
+        match self.rows.get(self.selected_row) {
+            Some(DashboardRow::Section { section, .. }) => Some(*section),
+            _ => None,
         }
     }
 
     fn selected_session(&self) -> Option<&Session> {
-        let DashboardRow::Session(index) = self.rows.get(self.selected_row)? else {
-            return None;
-        };
-        self.current_sessions().get(*index)
+        match self.rows.get(self.selected_row) {
+            Some(DashboardRow::Session(session_ref)) => Some(self.session_for_ref(*session_ref)),
+            _ => None,
+        }
     }
 
     fn select_first(&mut self) {
@@ -1531,6 +1662,7 @@ impl PickerApp {
             .rows
             .iter()
             .position(|row| matches!(row, DashboardRow::Session(_)))
+            .or_else(|| self.rows.iter().position(is_navigable_row))
             .unwrap_or_default();
     }
 
@@ -1539,6 +1671,7 @@ impl PickerApp {
             .rows
             .iter()
             .rposition(|row| matches!(row, DashboardRow::Session(_)))
+            .or_else(|| self.rows.iter().rposition(is_navigable_row))
             .unwrap_or_default();
     }
 
@@ -1548,7 +1681,7 @@ impl PickerApp {
             .iter()
             .enumerate()
             .skip(self.selected_row.saturating_add(1))
-            .find_map(|(index, row)| matches!(row, DashboardRow::Session(_)).then_some(index))
+            .find_map(|(index, row)| is_navigable_row(row).then_some(index))
         {
             self.selected_row = index;
         }
@@ -1557,7 +1690,7 @@ impl PickerApp {
     fn select_previous(&mut self) {
         if let Some(index) = self.rows[..self.selected_row.min(self.rows.len())]
             .iter()
-            .rposition(|row| matches!(row, DashboardRow::Session(_)))
+            .rposition(is_navigable_row)
         {
             self.selected_row = index;
         }
@@ -1568,6 +1701,36 @@ impl PickerApp {
             .iter()
             .filter(|row| matches!(row, DashboardRow::Session(_)))
             .count()
+    }
+
+    fn section_counts(&self) -> BTreeMap<DashboardSection, usize> {
+        let now = unix_now_seconds();
+        let mut counts = BTreeMap::new();
+        for session in &self.active {
+            if self.host_filter == ALL_HOSTS || session.host == self.host_filter {
+                *counts
+                    .entry(dashboard_section(
+                        session,
+                        false,
+                        self.unread_ids.contains(&session.id),
+                        now,
+                    ))
+                    .or_insert(0) += 1;
+            }
+        }
+        for session in &self.settled {
+            if self.host_filter == ALL_HOSTS || session.host == self.host_filter {
+                *counts
+                    .entry(dashboard_section(
+                        session,
+                        true,
+                        self.unread_ids.contains(&session.id),
+                        now,
+                    ))
+                    .or_insert(0) += 1;
+            }
+        }
+        counts
     }
 
     fn group_connectivity(&self, host: &str, fresh: bool) -> GroupConnectivity {
@@ -1589,6 +1752,48 @@ impl PickerApp {
             Some(HostPhase::Online | HostPhase::Cached) | None => GroupConnectivity::Cached,
         }
     }
+}
+
+fn is_navigable_row(row: &DashboardRow) -> bool {
+    matches!(row, DashboardRow::Section { .. } | DashboardRow::Session(_))
+}
+
+fn unix_now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn dashboard_section(
+    session: &Session,
+    settled: bool,
+    unread: bool,
+    now: u64,
+) -> DashboardSection {
+    if settled {
+        return DashboardSection::Archive;
+    }
+    if activity_is_current(session.activity) || unread {
+        return DashboardSection::Current;
+    }
+    let age = now.saturating_sub(session.last_interaction_unix_seconds);
+    if age <= DAY_SECONDS {
+        DashboardSection::LastDay
+    } else if age <= WEEK_SECONDS {
+        DashboardSection::LastWeek
+    } else {
+        DashboardSection::Archive
+    }
+}
+
+fn activity_is_current(activity: Activity) -> bool {
+    matches!(
+        activity,
+        Activity::Working
+            | Activity::WaitingApproval
+            | Activity::WaitingInput
+            | Activity::Failed
+    )
 }
 
 fn normalize_host_filter(host: &str) -> String {
@@ -1754,26 +1959,44 @@ fn draw(frame: &mut Frame<'_>, app: &PickerApp) {
 }
 
 fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
-    let active_style = if app.view == DashboardView::Active {
-        Style::default()
-            .add_modifier(Modifier::REVERSED)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        muted_style()
-    };
-    let settled_style = if app.view == DashboardView::Settled {
-        Style::default()
-            .add_modifier(Modifier::REVERSED)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        muted_style()
-    };
+    let counts = app.section_counts();
+    let count = |section| counts.get(&section).copied().unwrap_or_default();
     let title = Line::from(vec![
         Span::styled(" Rollcall ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-        Span::styled(format!(" Active {} ", app.active.len()), active_style),
-        Span::raw(" "),
-        Span::styled(format!(" Settled {} ", app.settled.len()), settled_style),
+        Span::styled(
+            format!(
+                " {} {} ",
+                DashboardSection::Current.label(),
+                count(DashboardSection::Current)
+            ),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                " {} {} ",
+                DashboardSection::LastDay.label(),
+                count(DashboardSection::LastDay)
+            ),
+            muted_style(),
+        ),
+        Span::styled(
+            format!(
+                " {} {} ",
+                DashboardSection::LastWeek.label(),
+                count(DashboardSection::LastWeek)
+            ),
+            muted_style(),
+        ),
+        Span::styled(
+            format!(
+                " {} {} ",
+                DashboardSection::Archive.label(),
+                count(DashboardSection::Archive)
+            ),
+            muted_style(),
+        ),
         Span::styled(
             format!(
                 "  {}",
@@ -1844,26 +2067,25 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
 }
 
 fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
-    if app.rows.is_empty() {
-        let noun = if app.view == DashboardView::Active {
-            "active"
-        } else {
-            "settled"
-        };
-        let message = if app.query.is_empty() {
-            format!("No {noun} sessions in this view.")
-        } else {
-            format!("No {noun} sessions match /{}.", app.query)
-        };
-        frame.render_widget(Paragraph::new(message).style(muted_style()), area);
-        return;
-    }
-
-    let sessions = app.current_sessions();
     let items = app
         .rows
         .iter()
         .map(|row| match row {
+            DashboardRow::Section {
+                section,
+                count,
+                expanded,
+            } => section_item(*section, *count, *expanded),
+            DashboardRow::Host {
+                host,
+                count,
+                fresh,
+            } => host_item(
+                host,
+                *count,
+                app.group_connectivity(host, *fresh),
+                area.width,
+            ),
             DashboardRow::Group {
                 cwd,
                 host,
@@ -1871,17 +2093,19 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                 fresh,
             } => group_item(
                 cwd,
-                host,
                 *count,
                 app.group_connectivity(host, *fresh),
                 area.width,
             ),
-            DashboardRow::Session(index) => session_item(
-                &sessions[*index],
-                app.fresh_ids.contains(&sessions[*index].id),
-                app.unread_ids.contains(&sessions[*index].id),
-                area.width,
-            ),
+            DashboardRow::Session(session_ref) => {
+                let session = app.session_for_ref(*session_ref);
+                session_item(
+                    session,
+                    app.fresh_ids.contains(&session.id),
+                    app.unread_ids.contains(&session.id),
+                    area.width,
+                )
+            }
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
@@ -1892,20 +2116,75 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
         )
         .highlight_symbol("› ");
     let mut state = ListState::default();
-    if app.selected_session().is_some() {
+    if app.rows.get(app.selected_row).is_some_and(is_navigable_row) {
         state.select(Some(app.selected_row));
     }
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn group_item(
-    cwd: &str,
+
+fn section_item(section: DashboardSection, count: usize, expanded: bool) -> ListItem<'static> {
+    let marker = if expanded { "▾" } else { "▸" };
+    let style = match section {
+        DashboardSection::Current => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        DashboardSection::LastDay | DashboardSection::LastWeek | DashboardSection::Archive => {
+            Style::default().add_modifier(Modifier::BOLD)
+        }
+    };
+    ListItem::new(Line::from(vec![
+        Span::styled(format!("{marker} "), style),
+        Span::styled(section.label(), style),
+        Span::styled(format!(" · {count}"), muted_style()),
+    ]))
+}
+
+fn host_item(
     host: &str,
     count: usize,
     connectivity: GroupConnectivity,
     width: u16,
 ) -> ListItem<'static> {
-    let (connectivity_label, connectivity_style) = match connectivity {
+    let (connectivity_label, connectivity_style) = connectivity_label(connectivity);
+    let suffix = format!(" · {count}{connectivity_label}");
+    let host_width = usize::from(width)
+        .saturating_sub(4 + suffix.chars().count())
+        .max(8);
+    ListItem::new(Line::from(vec![
+        Span::styled("  ▾ ", connectivity_style.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            truncate_with_ellipsis(host, host_width),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(suffix, connectivity_style),
+    ]))
+}
+
+fn group_item(
+    cwd: &str,
+    count: usize,
+    connectivity: GroupConnectivity,
+    width: u16,
+) -> ListItem<'static> {
+    let (connectivity_label, connectivity_style) = connectivity_label(connectivity);
+    let suffix = format!(" · {count}{connectivity_label}");
+    let directory = display_directory(cwd);
+    let cwd_width = usize::from(width)
+        .saturating_sub(6 + suffix.chars().count())
+        .max(8);
+    ListItem::new(Line::from(vec![
+        Span::styled("    ▾ ", connectivity_style),
+        Span::styled(
+            truncate_with_ellipsis(&directory, cwd_width),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(suffix, connectivity_style),
+    ]))
+}
+
+fn connectivity_label(connectivity: GroupConnectivity) -> (String, Style) {
+    match connectivity {
         GroupConnectivity::Online => (String::new(), Style::default().fg(Color::Green)),
         GroupConnectivity::Checking => {
             (" · checking".to_owned(), Style::default().fg(Color::Yellow))
@@ -1922,20 +2201,7 @@ fn group_item(
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         GroupConnectivity::Cached => (" · cached".to_owned(), muted_style()),
-    };
-    let suffix = format!(" / {host} · {count}{connectivity_label}");
-    let directory = display_directory(cwd);
-    let cwd_width = usize::from(width)
-        .saturating_sub(2 + suffix.chars().count() + 2)
-        .max(8);
-    ListItem::new(Line::from(vec![
-        Span::styled("▾ ", connectivity_style.add_modifier(Modifier::BOLD)),
-        Span::styled(
-            truncate_with_ellipsis(&directory, cwd_width),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(suffix, connectivity_style),
-    ]))
+    }
 }
 
 fn display_directory(cwd: &str) -> String {
@@ -2177,24 +2443,32 @@ fn draw_footer(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                     status.clone(),
                     Style::default().fg(Color::Yellow),
                 ))
-            } else {
+            } else if let Some(archived) = app
+                .selected_session()
+                .and_then(|session| app.archived_state_for_session(&session.id))
+            {
                 Line::from(vec![
                     Span::styled("↵", Style::default().fg(Color::Cyan)),
-                    Span::raw(if app.view == DashboardView::Settled {
+                    Span::raw(if archived {
                         " restore+open  "
                     } else {
                         " open  "
                     }),
                     Span::styled("a", Style::default().fg(Color::Cyan)),
-                    Span::raw(if app.view == DashboardView::Settled {
-                        " restore  "
-                    } else {
-                        " settle  "
-                    }),
+                    Span::raw(if archived { " restore  " } else { " settle  " }),
                     Span::styled("x", Style::default().fg(Color::Cyan)),
                     Span::raw(" read  "),
                     Span::styled("tab", Style::default().fg(Color::Cyan)),
-                    Span::raw(" view  "),
+                    Span::raw(" collapse section  "),
+                    Span::styled("/", Style::default().fg(Color::Cyan)),
+                    Span::raw(" search  "),
+                    Span::styled("?", Style::default().fg(Color::Cyan)),
+                    Span::raw(" keys"),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("↵/space/tab", Style::default().fg(Color::Cyan)),
+                    Span::raw(" toggle section  "),
                     Span::styled("/", Style::default().fg(Color::Cyan)),
                     Span::raw(" search  "),
                     Span::styled("?", Style::default().fg(Color::Cyan)),
@@ -2255,9 +2529,9 @@ fn draw_help(frame: &mut Frame<'_>) {
     let lines = vec![
         Line::from("  j/k or arrows   move"),
         Line::from("  g/G             first / last"),
-        Line::from("  enter           attach / resume"),
+        Line::from("  enter           attach / resume; toggle section"),
+        Line::from("  space/tab       expand / collapse section"),
         Line::from("  p               preview pane / response"),
-        Line::from("  tab             Active / Settled"),
         Line::from("  a               settle / restore"),
         Line::from("  x               mark selected session read"),
         Line::from("  /               search"),
@@ -2508,12 +2782,12 @@ fn format_age(timestamp: u64) -> String {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
     use super::{
-        Action, DashboardRow, DashboardView, InputMode, PickerApp, PreviewContent, RefreshEvent,
-        deduplicate_discovery_targets, format_age, normalize_host_filter, preview_window,
-        restrict_discovery_targets, session_matches, session_needs_detail, truncate_with_ellipsis,
-        wrap_preview_body, write_transition,
+        dashboard_section, deduplicate_discovery_targets, format_age, normalize_host_filter,
+        preview_window, restrict_discovery_targets, session_matches, session_needs_detail,
+        truncate_with_ellipsis, unix_now_seconds, write_transition, Action, DashboardRow,
+        DashboardSection, InputMode, PickerApp, PreviewContent, RefreshEvent, WEEK_SECONDS,
+        wrap_preview_body,
     };
     use crate::{
         agents,
@@ -2523,6 +2797,7 @@ mod tests {
     };
 
     fn session(id: &str, cwd: &str, title: &str) -> Session {
+        let now = unix_now_seconds();
         Session {
             id: format!("topo:codex:{id}"),
             host: "topo".to_owned(),
@@ -2533,8 +2808,8 @@ mod tests {
             source: "cli".to_owned(),
             activity: Activity::Completed,
             last_message: "The implementation is ready.".to_owned(),
-            last_interaction_unix_seconds: 100,
-            updated_unix_seconds: 100,
+            last_interaction_unix_seconds: now,
+            updated_unix_seconds: now,
             runtime: RuntimeOwner::TmuxFrontend,
             tmux: Some(TmuxBinding {
                 session: "agents".to_owned(),
@@ -2639,11 +2914,14 @@ mod tests {
 
     #[test]
     fn sessions_are_nested_beneath_directory_and_host_groups() {
+        let mut other_host = session("019d", "/tmp/project", "Three");
+        other_host.host = "coda".to_owned();
+        other_host.id = "coda:codex:019d".to_owned();
         let app = app_with_sessions(
             vec![
                 session("019f", "/fabric", "One"),
                 session("019e", "/fabric", "Two"),
-                session("019d", "/tmp/project", "Three"),
+                other_host,
             ],
             Vec::new(),
         );
@@ -2655,7 +2933,96 @@ mod tests {
                 .count(),
             2
         );
+        assert_eq!(
+            app.rows
+                .iter()
+                .filter(|row| matches!(row, DashboardRow::Host { .. }))
+                .count(),
+            2
+        );
+        let host_row = app
+            .rows
+            .iter()
+            .position(|row| matches!(row, DashboardRow::Host { .. }))
+            .expect("host group should be rendered");
+        let project_row = app
+            .rows
+            .iter()
+            .position(|row| matches!(row, DashboardRow::Group { .. }))
+            .expect("project group should be rendered");
+        assert!(host_row < project_row);
+        assert!(matches!(
+            app.rows.get(project_row + 1),
+            Some(DashboardRow::Session(_))
+        ));
         assert_eq!(app.visible_session_count(), 3);
+    }
+
+    #[test]
+    fn dashboard_sections_prioritize_live_activity_then_recency() {
+        let now = 2_000_000;
+        let mut current = session("current", "/fabric", "Current");
+        current.activity = Activity::Working;
+        let mut today = session("today", "/fabric", "Today");
+        today.last_interaction_unix_seconds = now - 60;
+        let mut week = session("week", "/fabric", "Week");
+        week.last_interaction_unix_seconds = now - 86_401;
+        let archived = session("archived", "/fabric", "Archive");
+
+        assert_eq!(
+            dashboard_section(&current, false, false, now),
+            DashboardSection::Current
+        );
+        assert_eq!(
+            dashboard_section(&today, false, false, now),
+            DashboardSection::LastDay
+        );
+        assert_eq!(
+            dashboard_section(&week, false, false, now),
+            DashboardSection::LastWeek
+        );
+        assert_eq!(
+            dashboard_section(&archived, true, false, now),
+            DashboardSection::Archive
+        );
+
+        let mut old = session("old", "/fabric", "Old");
+        old.last_interaction_unix_seconds = now - WEEK_SECONDS - 1;
+        assert_eq!(
+            dashboard_section(&old, false, false, now),
+            DashboardSection::Archive
+        );
+    }
+
+    #[test]
+    fn archive_is_present_but_collapsed_by_default() {
+        let app = app_with_sessions(Vec::new(), vec![session("019f", "/fabric", "Archive")]);
+
+        assert_eq!(app.visible_session_count(), 0);
+        assert!(app.rows.iter().any(|row| matches!(
+            row,
+            DashboardRow::Section {
+                section: DashboardSection::Archive,
+                expanded: false,
+                count: 1,
+            }
+        )));
+    }
+
+    #[test]
+    fn archive_section_can_be_expanded_without_changing_other_buckets() {
+        let mut app = app_with_sessions(
+            vec![session("019e", "/fabric", "Recent")],
+            vec![session("019f", "/fabric", "Archive")],
+        );
+        app.expanded_sections.insert(DashboardSection::Archive);
+        app.rebuild_rows();
+
+        assert_eq!(app.visible_session_count(), 2);
+        assert_eq!(
+            app.selected_session().map(|session| session.title.as_str()),
+            Some("Recent")
+        );
     }
 
     #[test]
@@ -2804,20 +3171,20 @@ mod tests {
     }
 
     #[test]
-    fn tab_switches_to_settled_view() {
-        let mut app = app_with_sessions(
-            vec![session("019f", "/fabric", "Active")],
-            vec![session("019e", "/fabric", "Settled")],
-        );
+    fn tab_toggles_the_selected_time_section() {
+        let mut active = session("019f", "/fabric", "Active");
+        active.activity = Activity::Working;
+        let mut app = app_with_sessions(vec![active], vec![session("019e", "/fabric", "Settled")]);
 
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-
-        assert_eq!(app.view, DashboardView::Settled);
-        assert_eq!(app.visible_session_count(), 1);
         assert_eq!(
             app.selected_session().map(|session| session.title.as_str()),
-            Some("Settled")
+            Some("Active")
         );
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(!app.expanded_sections.contains(&DashboardSection::Current));
+        assert_eq!(app.visible_session_count(), 0);
+        assert!(app.selected_section().is_some());
     }
 
     #[test]
@@ -2840,10 +3207,11 @@ mod tests {
 
     #[test]
     fn progressive_refresh_keeps_the_same_session_selected_after_reordering() {
+        let now = unix_now_seconds();
         let mut first = session("019f", "/fabric", "First");
-        first.last_interaction_unix_seconds = 200;
+        first.last_interaction_unix_seconds = now;
         let mut second = session("019e", "/fabric", "Second");
-        second.last_interaction_unix_seconds = 100;
+        second.last_interaction_unix_seconds = now.saturating_sub(1);
         let mut app = app_with_sessions(vec![first, second], Vec::new());
         app.select_next();
         let selected_id = app
@@ -2917,7 +3285,7 @@ mod tests {
     }
 
     #[test]
-    fn unread_completed_sessions_sort_ahead_of_working_sessions() {
+    fn unread_attention_stays_ahead_of_other_current_sessions() {
         let completed = session("019f", "/completed", "Unread completion");
         let mut working = session("019e", "/working", "Working");
         working.activity = Activity::Working;
@@ -3092,7 +3460,11 @@ mod tests {
             query: String::new(),
             selected_row: 0,
             input_mode: InputMode::Browse,
-            view: DashboardView::Active,
+            expanded_sections: BTreeSet::from([
+                DashboardSection::Current,
+                DashboardSection::LastDay,
+                DashboardSection::LastWeek,
+            ]),
             show_details: false,
             host_filter: "all".to_owned(),
             host_choices: vec!["all".to_owned(), "topo".to_owned()],
