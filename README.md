@@ -326,6 +326,10 @@ session on that host and runs `codex --remote unix://SOCKET resume <id>` against
 Rollcall's internal app-server. Repeated selection reuses that tmux container
 rather than adding more sessions.
 
+For OMP sessions already running in a tmux pane, Rollcall correlates the native
+resume ID from the agent process and attaches to that existing pane. It does
+not create a second `rc-omp-*` container for the same session.
+
 An external frontend cannot be moved into tmux portably. Enter therefore leaves
 an externally owned thread alone and explains why instead of starting a
 competing Codex process. Once that frontend releases the thread, the next

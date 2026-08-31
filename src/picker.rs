@@ -226,7 +226,7 @@ fn event_loop(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum DashboardSection {
     Current,
     LastDay,
@@ -253,6 +253,26 @@ enum SessionRef {
     Settled(usize),
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum DashboardGroupKey {
+    Host {
+        section: DashboardSection,
+        host: String,
+    },
+    Project {
+        section: DashboardSection,
+        host: String,
+        cwd: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DashboardSelection {
+    Section(DashboardSection),
+    Group(DashboardGroupKey),
+    Session(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputMode {
     Browse,
@@ -260,6 +280,15 @@ enum InputMode {
     Hosts,
     Help,
     Preview,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GroupConnectivity {
+    Online,
+    Checking,
+    Offline(Option<u64>),
+    Blocked,
+    Cached,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -270,26 +299,21 @@ enum DashboardRow {
         expanded: bool,
     },
     Host {
+        section: DashboardSection,
         host: String,
         count: usize,
         fresh: bool,
+        expanded: bool,
     },
     Group {
+        section: DashboardSection,
         cwd: String,
         host: String,
         count: usize,
         fresh: bool,
+        expanded: bool,
     },
     Session(SessionRef),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GroupConnectivity {
-    Online,
-    Checking,
-    Offline(Option<u64>),
-    Blocked,
-    Cached,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -367,6 +391,7 @@ struct PickerApp {
     selected_row: usize,
     input_mode: InputMode,
     expanded_sections: BTreeSet<DashboardSection>,
+    collapsed_groups: HashSet<DashboardGroupKey>,
     show_details: bool,
     host_filter: String,
     host_choices: Vec<String>,
@@ -440,6 +465,7 @@ impl PickerApp {
                 DashboardSection::LastDay,
                 DashboardSection::LastWeek,
             ]),
+            collapsed_groups: HashSet::new(),
             show_details: false,
             host_filter,
             host_choices: vec![ALL_HOSTS.to_owned()],
@@ -512,7 +538,7 @@ impl PickerApp {
                 Action::None
             }
             KeyCode::Tab | KeyCode::Char(' ') => {
-                self.toggle_selected_section();
+                self.toggle_selected_row();
                 Action::None
             }
             KeyCode::Char('r') => Action::Refresh,
@@ -554,12 +580,12 @@ impl PickerApp {
             }
             KeyCode::Backspace => {
                 self.query.pop();
-                self.rebuild_rows();
+                self.rebuild_rows_selecting(None);
                 Action::None
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.query.clear();
-                self.rebuild_rows();
+                self.rebuild_rows_selecting(None);
                 Action::None
             }
             KeyCode::Char(character)
@@ -568,7 +594,7 @@ impl PickerApp {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.query.push(character);
-                self.rebuild_rows();
+                self.rebuild_rows_selecting(None);
                 Action::None
             }
             _ => Action::None,
@@ -685,8 +711,8 @@ impl PickerApp {
     }
 
     fn selected_action(&mut self) -> Action {
-        if self.selected_section().is_some() {
-            self.toggle_selected_section();
+        if self.selected_section().is_some() || self.selected_group_key().is_some() {
+            self.toggle_selected_row();
             return Action::None;
         }
         let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
@@ -823,23 +849,45 @@ impl PickerApp {
             .unwrap_or(Action::None)
     }
 
-    fn toggle_selected_section(&mut self) {
-        let Some(section) = self.selected_section().or_else(|| {
-            self.rows[..self.selected_row.min(self.rows.len())]
-                .iter()
-                .rev()
-                .find_map(|row| match row {
-                    DashboardRow::Section { section, .. } => Some(*section),
-                    _ => None,
-                })
-        }) else {
+    fn toggle_selected_row(&mut self) {
+        let Some(row) = self.rows.get(self.selected_row) else {
             return;
         };
-        if !self.expanded_sections.remove(&section) {
-            self.expanded_sections.insert(section);
+        let selection = match row {
+            DashboardRow::Section { section, .. } => DashboardSelection::Section(*section),
+            DashboardRow::Host { .. } | DashboardRow::Group { .. } => {
+                let Some(group) = row_group_key(row) else {
+                    return;
+                };
+                DashboardSelection::Group(group)
+            }
+            DashboardRow::Session(_) => {
+                let group = self.rows[..=self.selected_row]
+                    .iter()
+                    .rev()
+                    .find_map(row_group_key);
+                let Some(group) = group else {
+                    return;
+                };
+                DashboardSelection::Group(group)
+            }
+        };
+
+        match &selection {
+            DashboardSelection::Section(section) => {
+                if !self.expanded_sections.remove(section) {
+                    self.expanded_sections.insert(*section);
+                }
+            }
+            DashboardSelection::Group(group) => {
+                if !self.collapsed_groups.remove(group) {
+                    self.collapsed_groups.insert(group.clone());
+                }
+            }
+            DashboardSelection::Session(_) => return,
         }
         self.status = None;
-        self.rebuild_rows();
+        self.rebuild_rows_selecting(Some(selection));
     }
 
     fn set_host_filter(&mut self, host: String) {
@@ -1052,7 +1100,7 @@ impl PickerApp {
     }
 
     fn apply_refresh_event(&mut self, event: RefreshEvent) -> Result<(), PickerError> {
-        let selected_session_id = self.selected_session().map(|session| session.id.clone());
+        let selection = self.selected_selection();
         match event {
             RefreshEvent::Basic {
                 generation,
@@ -1171,7 +1219,7 @@ impl PickerApp {
 
         self.reload_snapshots()?;
         self.rebuild_host_choices();
-        self.rebuild_rows_selecting(selected_session_id.as_deref());
+        self.rebuild_rows_selecting(selection);
         self.update_refresh_status();
         Ok(())
     }
@@ -1181,7 +1229,7 @@ impl PickerApp {
         target: &str,
         observations: &BTreeMap<String, LiveObservation>,
     ) -> Result<(), PickerError> {
-        let selected_session_id = self.selected_session().map(|session| session.id.clone());
+        let selection = self.selected_selection();
         let observed_host = agents::observed_host(target);
         let mut updates = Vec::new();
 
@@ -1208,7 +1256,7 @@ impl PickerApp {
 
         if !updates.is_empty() {
             self.record_sessions(&updates)?;
-            self.rebuild_rows_selecting(selected_session_id.as_deref());
+            self.rebuild_rows_selecting(selection);
         }
         Ok(())
     }
@@ -1403,7 +1451,7 @@ impl PickerApp {
             .map_or_else(|| session_id.to_owned(), |session| session.title.clone());
         let changed = self.store.acknowledge(session_id)?;
         self.unread_ids.remove(session_id);
-        self.rebuild_rows_selecting(Some(session_id));
+        self.rebuild_rows_selecting(Some(DashboardSelection::Session(session_id.to_owned())));
         if show_status {
             let message = if changed {
                 format!("Marked {title} read.")
@@ -1469,12 +1517,13 @@ impl PickerApp {
     }
 
     fn rebuild_rows(&mut self) {
-        let selected_session_id = self.selected_session().map(|session| session.id.clone());
-        self.rebuild_rows_selecting(selected_session_id.as_deref());
+        let selection = self.selected_selection();
+        self.rebuild_rows_selecting(selection);
     }
 
-    fn rebuild_rows_selecting(&mut self, selected_session_id: Option<&str>) {
+    fn rebuild_rows_selecting(&mut self, selection: Option<DashboardSelection>) {
         let query = self.query.to_lowercase();
+        let query_active = !query.is_empty();
         let now = unix_now_seconds();
         let mut sections: BTreeMap<DashboardSection, Vec<SessionRef>> = BTreeMap::new();
 
@@ -1512,12 +1561,14 @@ impl PickerApp {
         let mut rows = Vec::new();
         for section in DashboardSection::ALL {
             let sessions = sections.remove(&section).unwrap_or_default();
+            let section_expanded =
+                self.expanded_sections.contains(&section) || (query_active && !sessions.is_empty());
             rows.push(DashboardRow::Section {
                 section,
                 count: sessions.len(),
-                expanded: self.expanded_sections.contains(&section),
+                expanded: section_expanded,
             });
-            if !self.expanded_sections.contains(&section) {
+            if !section_expanded {
                 continue;
             }
 
@@ -1535,14 +1586,25 @@ impl PickerApp {
             });
 
             for (host, sessions) in hosts {
-                let fresh = sessions
-                    .iter()
-                    .any(|session_ref| self.fresh_ids.contains(&self.session_for_ref(*session_ref).id));
+                let fresh = sessions.iter().any(|session_ref| {
+                    self.fresh_ids
+                        .contains(&self.session_for_ref(*session_ref).id)
+                });
+                let host_key = DashboardGroupKey::Host {
+                    section,
+                    host: host.clone(),
+                };
+                let host_expanded = query_active || !self.collapsed_groups.contains(&host_key);
                 rows.push(DashboardRow::Host {
+                    section,
                     host: host.clone(),
                     count: sessions.len(),
                     fresh,
+                    expanded: host_expanded,
                 });
+                if !host_expanded {
+                    continue;
+                }
 
                 let mut projects: BTreeMap<String, Vec<SessionRef>> = BTreeMap::new();
                 for session_ref in sessions {
@@ -1566,37 +1628,52 @@ impl PickerApp {
                             std::cmp::Reverse(session.last_interaction_unix_seconds),
                         )
                     });
-                    let fresh = sessions
-                        .iter()
-                        .any(|session_ref| self.fresh_ids.contains(&self.session_for_ref(*session_ref).id));
+                    let fresh = sessions.iter().any(|session_ref| {
+                        self.fresh_ids
+                            .contains(&self.session_for_ref(*session_ref).id)
+                    });
+                    let project_key = DashboardGroupKey::Project {
+                        section,
+                        host: host.clone(),
+                        cwd: cwd.clone(),
+                    };
+                    let project_expanded =
+                        query_active || !self.collapsed_groups.contains(&project_key);
                     rows.push(DashboardRow::Group {
+                        section,
                         cwd,
                         host: host.clone(),
                         count: sessions.len(),
                         fresh,
+                        expanded: project_expanded,
                     });
-                    rows.extend(sessions.into_iter().map(DashboardRow::Session));
+                    if project_expanded {
+                        rows.extend(sessions.into_iter().map(DashboardRow::Session));
+                    }
                 }
             }
         }
 
         self.rows = rows;
-        self.selected_row = selected_session_id
-            .and_then(|selected_id| {
-                self.rows.iter().position(|row| {
-                    let DashboardRow::Session(session_ref) = row else {
-                        return false;
-                    };
-                    self.session_for_ref(*session_ref).id == selected_id
+        self.selected_row = selection
+            .and_then(|selection| {
+                self.rows.iter().position(|row| match &selection {
+                    DashboardSelection::Section(section) => {
+                        matches!(row, DashboardRow::Section { section: candidate, .. } if candidate == section)
+                    }
+                    DashboardSelection::Group(group) => row_group_key(row).as_ref() == Some(group),
+                    DashboardSelection::Session(selected_id) => {
+                        matches!(row, DashboardRow::Session(session_ref) if self.session_for_ref(*session_ref).id == *selected_id)
+                    }
                 })
             })
-            .unwrap_or_else(|| {
+            .or_else(|| {
                 self.rows
                     .iter()
                     .position(|row| matches!(row, DashboardRow::Session(_)))
-                    .or_else(|| self.rows.iter().position(is_navigable_row))
-                    .unwrap_or_default()
-            });
+            })
+            .or_else(|| self.rows.iter().position(is_navigable_row))
+            .unwrap_or_default();
     }
 
     fn compare_session_groups(
@@ -1604,12 +1681,14 @@ impl PickerApp {
         left: &[SessionRef],
         right: &[SessionRef],
     ) -> std::cmp::Ordering {
-        let left_unread = left
-            .iter()
-            .any(|session_ref| self.unread_ids.contains(&self.session_for_ref(*session_ref).id));
-        let right_unread = right
-            .iter()
-            .any(|session_ref| self.unread_ids.contains(&self.session_for_ref(*session_ref).id));
+        let left_unread = left.iter().any(|session_ref| {
+            self.unread_ids
+                .contains(&self.session_for_ref(*session_ref).id)
+        });
+        let right_unread = right.iter().any(|session_ref| {
+            self.unread_ids
+                .contains(&self.session_for_ref(*session_ref).id)
+        });
         let left_priority = left
             .iter()
             .map(|session_ref| activity_priority(self.session_for_ref(*session_ref).activity))
@@ -1622,12 +1701,18 @@ impl PickerApp {
             .unwrap_or(u8::MAX);
         let left_recency = left
             .iter()
-            .map(|session_ref| self.session_for_ref(*session_ref).last_interaction_unix_seconds)
+            .map(|session_ref| {
+                self.session_for_ref(*session_ref)
+                    .last_interaction_unix_seconds
+            })
             .max()
             .unwrap_or_default();
         let right_recency = right
             .iter()
-            .map(|session_ref| self.session_for_ref(*session_ref).last_interaction_unix_seconds)
+            .map(|session_ref| {
+                self.session_for_ref(*session_ref)
+                    .last_interaction_unix_seconds
+            })
             .max()
             .unwrap_or_default();
         right_unread
@@ -1648,6 +1733,24 @@ impl PickerApp {
             Some(DashboardRow::Section { section, .. }) => Some(*section),
             _ => None,
         }
+    }
+    fn selected_selection(&self) -> Option<DashboardSelection> {
+        match self.rows.get(self.selected_row) {
+            Some(DashboardRow::Section { section, .. }) => {
+                Some(DashboardSelection::Section(*section))
+            }
+            Some(row @ (DashboardRow::Host { .. } | DashboardRow::Group { .. })) => {
+                row_group_key(row).map(DashboardSelection::Group)
+            }
+            Some(DashboardRow::Session(session_ref)) => Some(DashboardSelection::Session(
+                self.session_for_ref(*session_ref).id.clone(),
+            )),
+            None => None,
+        }
+    }
+
+    fn selected_group_key(&self) -> Option<DashboardGroupKey> {
+        self.rows.get(self.selected_row).and_then(row_group_key)
     }
 
     fn selected_session(&self) -> Option<&Session> {
@@ -1754,8 +1857,31 @@ impl PickerApp {
     }
 }
 
+fn row_group_key(row: &DashboardRow) -> Option<DashboardGroupKey> {
+    match row {
+        DashboardRow::Host { section, host, .. } => Some(DashboardGroupKey::Host {
+            section: *section,
+            host: host.clone(),
+        }),
+        DashboardRow::Group {
+            section, host, cwd, ..
+        } => Some(DashboardGroupKey::Project {
+            section: *section,
+            host: host.clone(),
+            cwd: cwd.clone(),
+        }),
+        _ => None,
+    }
+}
+
 fn is_navigable_row(row: &DashboardRow) -> bool {
-    matches!(row, DashboardRow::Section { .. } | DashboardRow::Session(_))
+    matches!(
+        row,
+        DashboardRow::Section { .. }
+            | DashboardRow::Host { .. }
+            | DashboardRow::Group { .. }
+            | DashboardRow::Session(_)
+    )
 }
 
 fn unix_now_seconds() -> u64 {
@@ -1764,12 +1890,7 @@ fn unix_now_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn dashboard_section(
-    session: &Session,
-    settled: bool,
-    unread: bool,
-    now: u64,
-) -> DashboardSection {
+fn dashboard_section(session: &Session, settled: bool, unread: bool, now: u64) -> DashboardSection {
     if settled {
         return DashboardSection::Archive;
     }
@@ -1789,10 +1910,7 @@ fn dashboard_section(
 fn activity_is_current(activity: Activity) -> bool {
     matches!(
         activity,
-        Activity::Working
-            | Activity::WaitingApproval
-            | Activity::WaitingInput
-            | Activity::Failed
+        Activity::Working | Activity::WaitingApproval | Activity::WaitingInput | Activity::Failed
     )
 }
 
@@ -2080,10 +2198,13 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                 host,
                 count,
                 fresh,
+                expanded,
+                ..
             } => host_item(
                 host,
                 *count,
                 app.group_connectivity(host, *fresh),
+                *expanded,
                 area.width,
             ),
             DashboardRow::Group {
@@ -2091,10 +2212,13 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                 host,
                 count,
                 fresh,
+                expanded,
+                ..
             } => group_item(
                 cwd,
                 *count,
                 app.group_connectivity(host, *fresh),
+                *expanded,
                 area.width,
             ),
             DashboardRow::Session(session_ref) => {
@@ -2122,7 +2246,6 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-
 fn section_item(section: DashboardSection, count: usize, expanded: bool) -> ListItem<'static> {
     let marker = if expanded { "▾" } else { "▸" };
     let style = match section {
@@ -2144,6 +2267,7 @@ fn host_item(
     host: &str,
     count: usize,
     connectivity: GroupConnectivity,
+    expanded: bool,
     width: u16,
 ) -> ListItem<'static> {
     let (connectivity_label, connectivity_style) = connectivity_label(connectivity);
@@ -2151,8 +2275,12 @@ fn host_item(
     let host_width = usize::from(width)
         .saturating_sub(4 + suffix.chars().count())
         .max(8);
+    let marker = if expanded { "▾" } else { "▸" };
     ListItem::new(Line::from(vec![
-        Span::styled("  ▾ ", connectivity_style.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("  {marker} "),
+            connectivity_style.add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             truncate_with_ellipsis(host, host_width),
             Style::default().add_modifier(Modifier::BOLD),
@@ -2165,6 +2293,7 @@ fn group_item(
     cwd: &str,
     count: usize,
     connectivity: GroupConnectivity,
+    expanded: bool,
     width: u16,
 ) -> ListItem<'static> {
     let (connectivity_label, connectivity_style) = connectivity_label(connectivity);
@@ -2173,8 +2302,9 @@ fn group_item(
     let cwd_width = usize::from(width)
         .saturating_sub(6 + suffix.chars().count())
         .max(8);
+    let marker = if expanded { "▾" } else { "▸" };
     ListItem::new(Line::from(vec![
-        Span::styled("    ▾ ", connectivity_style),
+        Span::styled(format!("    {marker} "), connectivity_style),
         Span::styled(
             truncate_with_ellipsis(&directory, cwd_width),
             Style::default().add_modifier(Modifier::BOLD),
@@ -2459,7 +2589,7 @@ fn draw_footer(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                     Span::styled("x", Style::default().fg(Color::Cyan)),
                     Span::raw(" read  "),
                     Span::styled("tab", Style::default().fg(Color::Cyan)),
-                    Span::raw(" collapse section  "),
+                    Span::raw(" collapse group  "),
                     Span::styled("/", Style::default().fg(Color::Cyan)),
                     Span::raw(" search  "),
                     Span::styled("?", Style::default().fg(Color::Cyan)),
@@ -2468,7 +2598,7 @@ fn draw_footer(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
             } else {
                 Line::from(vec![
                     Span::styled("↵/space/tab", Style::default().fg(Color::Cyan)),
-                    Span::raw(" toggle section  "),
+                    Span::raw(" toggle row  "),
                     Span::styled("/", Style::default().fg(Color::Cyan)),
                     Span::raw(" search  "),
                     Span::styled("?", Style::default().fg(Color::Cyan)),
@@ -2529,8 +2659,8 @@ fn draw_help(frame: &mut Frame<'_>) {
     let lines = vec![
         Line::from("  j/k or arrows   move"),
         Line::from("  g/G             first / last"),
-        Line::from("  enter           attach / resume; toggle section"),
-        Line::from("  space/tab       expand / collapse section"),
+        Line::from("  enter           attach / resume; toggle selected group/section"),
+        Line::from("  space/tab       expand / collapse selected group/section"),
         Line::from("  p               preview pane / response"),
         Line::from("  a               settle / restore"),
         Line::from("  x               mark selected session read"),
@@ -2702,13 +2832,23 @@ fn draw_hosts(frame: &mut Frame<'_>, app: &PickerApp) {
         .host_choices
         .iter()
         .map(|host| {
-            let current = if host == &app.host_filter { "  current" } else { "" };
+            let current = if host == &app.host_filter {
+                "  current"
+            } else {
+                ""
+            };
             let (active, settled) = if host == ALL_HOSTS {
                 (app.active.len(), app.settled.len())
             } else {
                 (
-                    app.active.iter().filter(|session| session.host == *host).count(),
-                    app.settled.iter().filter(|session| session.host == *host).count(),
+                    app.active
+                        .iter()
+                        .filter(|session| session.host == *host)
+                        .count(),
+                    app.settled
+                        .iter()
+                        .filter(|session| session.host == *host)
+                        .count(),
                 )
             };
             let state = app
@@ -2781,13 +2921,12 @@ fn format_age(timestamp: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use super::{
-        dashboard_section, deduplicate_discovery_targets, format_age, normalize_host_filter,
-        preview_window, restrict_discovery_targets, session_matches, session_needs_detail,
-        truncate_with_ellipsis, unix_now_seconds, write_transition, Action, DashboardRow,
-        DashboardSection, InputMode, PickerApp, PreviewContent, RefreshEvent, WEEK_SECONDS,
-        wrap_preview_body,
+        Action, DashboardRow, DashboardSection, DashboardSelection, InputMode, PickerApp,
+        PreviewContent, RefreshEvent, WEEK_SECONDS, dashboard_section,
+        deduplicate_discovery_targets, format_age, normalize_host_filter, preview_window,
+        restrict_discovery_targets, session_matches, session_needs_detail, truncate_with_ellipsis,
+        unix_now_seconds, wrap_preview_body, write_transition,
     };
     use crate::{
         agents,
@@ -2795,6 +2934,7 @@ mod tests {
         hosts::{ConnectivityState, SshHost},
         store::{SessionTransition, SessionTransitionKind, Store},
     };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn session(id: &str, cwd: &str, title: &str) -> Session {
         let now = unix_now_seconds();
@@ -2957,6 +3097,28 @@ mod tests {
         ));
         assert_eq!(app.visible_session_count(), 3);
     }
+    #[test]
+    fn host_groups_can_collapse_without_losing_project_state() {
+        let mut app = app_with_sessions(vec![session("019f", "/fabric", "One")], Vec::new());
+        let host_row = app
+            .rows
+            .iter()
+            .position(|row| matches!(row, DashboardRow::Host { .. }))
+            .expect("host group should be rendered");
+        app.selected_row = host_row;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        assert!(matches!(
+            app.rows.get(host_row),
+            Some(DashboardRow::Host {
+                expanded: false,
+                ..
+            })
+        ));
+        assert_eq!(app.visible_session_count(), 0);
+        assert!(app.selected_group_key().is_some());
+    }
 
     #[test]
     fn dashboard_sections_prioritize_live_activity_then_recency() {
@@ -3007,6 +3169,37 @@ mod tests {
                 count: 1,
             }
         )));
+    }
+    #[test]
+    fn search_auto_expands_collapsed_archive_and_selects_match() {
+        let mut app = app_with_sessions(
+            Vec::new(),
+            vec![session("019f", "/fabric", "Searchable archive")],
+        );
+        app.input_mode = InputMode::Search;
+
+        for character in "searchable".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert_eq!(app.visible_session_count(), 1);
+        assert_eq!(
+            app.selected_session().map(|session| session.title.as_str()),
+            Some("Searchable archive")
+        );
+        assert!(app.rows.iter().any(|row| matches!(
+            row,
+            DashboardRow::Section {
+                section: DashboardSection::Archive,
+                expanded: true,
+                count: 1,
+            }
+        )));
+        assert!(
+            app.rows
+                .iter()
+                .any(|row| matches!(row, DashboardRow::Group { expanded: true, .. }))
+        );
     }
 
     #[test]
@@ -3171,7 +3364,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_toggles_the_selected_time_section() {
+    fn tab_toggles_the_selected_project_group() {
         let mut active = session("019f", "/fabric", "Active");
         active.activity = Activity::Working;
         let mut app = app_with_sessions(vec![active], vec![session("019e", "/fabric", "Settled")]);
@@ -3182,9 +3375,29 @@ mod tests {
         );
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
-        assert!(!app.expanded_sections.contains(&DashboardSection::Current));
+        assert!(app.rows.iter().any(|row| matches!(
+            row,
+            DashboardRow::Group {
+                cwd,
+                expanded: false,
+                ..
+            } if cwd == "/fabric"
+        )));
         assert_eq!(app.visible_session_count(), 0);
-        assert!(app.selected_section().is_some());
+        assert!(app.selected_group_key().is_some());
+        let group = app
+            .selected_group_key()
+            .expect("collapsed project group should remain selected");
+        app.active.reverse();
+        app.rebuild_rows();
+        assert!(app.collapsed_groups.contains(&group));
+        assert!(app.rows.iter().any(|row| matches!(
+            row,
+            DashboardRow::Group {
+                expanded: false,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -3220,7 +3433,7 @@ mod tests {
             .expect("a session should be selected");
 
         app.active.reverse();
-        app.rebuild_rows_selecting(Some(&selected_id));
+        app.rebuild_rows_selecting(Some(DashboardSelection::Session(selected_id.clone())));
 
         assert_eq!(
             app.selected_session().map(|session| session.id.as_str()),
@@ -3465,6 +3678,7 @@ mod tests {
                 DashboardSection::LastDay,
                 DashboardSection::LastWeek,
             ]),
+            collapsed_groups: HashSet::new(),
             show_details: false,
             host_filter: "all".to_owned(),
             host_choices: vec!["all".to_owned(), "topo".to_owned()],

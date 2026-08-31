@@ -7,7 +7,7 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Activity, Session};
+use crate::domain::{Activity, AgentKind, Session};
 
 pub const DEFAULT_STALE_AFTER_SECONDS: u64 = 7 * 24 * 60 * 60;
 
@@ -246,6 +246,9 @@ impl Store {
                 ",
             )?;
             for session in sessions {
+                if is_legacy_omp_subagent(session) {
+                    continue;
+                }
                 let previous = previous_statement
                     .query_row([&session.id], |row| {
                         Ok((
@@ -303,6 +306,7 @@ impl Store {
         snapshots
             .into_iter()
             .map(|snapshot| serde_json::from_str(&snapshot).map_err(Into::into))
+            .filter(|snapshot| !matches!(snapshot, Ok(session) if is_legacy_omp_subagent(session)))
             .collect()
     }
 
@@ -361,6 +365,7 @@ impl Store {
                     })
                 },
             )
+            .filter(|entry| !matches!(entry, Ok(entry) if is_legacy_omp_subagent(&entry.session)))
             .collect()
     }
 
@@ -570,6 +575,10 @@ fn nonnegative_u64(value: i64) -> Option<u64> {
     u64::try_from(value).ok()
 }
 
+fn is_legacy_omp_subagent(session: &Session) -> bool {
+    (session.agent == AgentKind::Omp || session.source == "omp") && session.title.trim().is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, params};
@@ -642,6 +651,27 @@ mod tests {
 
         assert_eq!(store.load(false).expect("active view should load").len(), 1);
         assert!(store.load(true).expect("archive should load").is_empty());
+    }
+    #[test]
+    fn legacy_unnamed_omp_subagents_are_hidden_from_inventory_views() {
+        let mut store = Store::open_memory().expect("memory store should open");
+        let mut legacy = session("");
+        legacy.id = "topo:omp:legacy".to_owned();
+        legacy.agent = AgentKind::Omp;
+        legacy.native_session_id = "legacy".to_owned();
+        legacy.source = "omp".to_owned();
+
+        store
+            .record(&[session("visible"), legacy])
+            .expect("snapshots should save");
+
+        assert_eq!(store.load(false).expect("active view should load").len(), 1);
+        assert_eq!(
+            store.load_history().expect("history should load")[0]
+                .session
+                .title,
+            "visible"
+        );
     }
 
     #[test]
