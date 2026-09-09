@@ -87,7 +87,9 @@ pub fn observe_live(host: &str) -> Result<BTreeMap<String, LiveObservation>, Age
     let codex_result = codex::observe_live(host);
     let omp_result = omp::observe_live(host);
     let mut observations = match codex_result {
-        Ok(observations) => qualify_live_observations(&observed_host, AgentKind::Codex, observations),
+        Ok(observations) => {
+            qualify_live_observations(&observed_host, AgentKind::Codex, observations)
+        }
         Err(_error) if omp_result.is_ok() => BTreeMap::new(),
         Err(error) => return Err(error.into()),
     };

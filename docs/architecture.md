@@ -109,6 +109,52 @@ The current implementation applies the snapshot portion progressively:
 
 Offline hosts never block local or reachable-host navigation.
 
+## Notifications and Watching
+
+Meaningful transitions mark a session unread: working/approval/input to
+completed, a new approval/input request, or a failure. The picker shows a yellow
+dot and prioritizes the session's group. Press `x` to mark it read; attaching or
+manually settling it also acknowledges attention.
+
+While Rollcall runs, transitions and host recovery ring the terminal bell by
+default. Set a local notification hook instead:
+
+```sh
+export ROLLCALL_NOTIFY_COMMAND='notify-send "$ROLLCALL_NOTIFICATION_TITLE" "$ROLLCALL_NOTIFICATION_BODY"'
+```
+
+With Termux:API:
+
+```sh
+export ROLLCALL_NOTIFY_COMMAND='termux-notification --title "$ROLLCALL_NOTIFICATION_TITLE" --content "$ROLLCALL_NOTIFICATION_BODY"'
+```
+
+The hook receives `ROLLCALL_NOTIFICATION_KIND`, `ROLLCALL_NOTIFICATION_TITLE`,
+`ROLLCALL_NOTIFICATION_BODY`, `ROLLCALL_NOTIFICATION_HOST`, and
+`ROLLCALL_NOTIFICATION_SESSION_ID` as environment variables. Session text is
+not interpolated into shell source. Set `ROLLCALL_NOTIFY_COMMAND` to an empty
+value to disable both the hook and bell.
+
+For monitoring without the picker:
+
+```sh
+rollcall watch
+rollcall watch --host HOST
+rollcall watch --json
+rollcall watch --once
+```
+
+`watch` uses the picker's scheduler, live polling, reconnection, and persisted
+attention. It emits tab-separated events, or newline-delimited JSON with
+`--json`, and stops with `Ctrl-C`. It stays in the foreground; no daemon or
+remote service is installed.
+
+`--once` checks each selected host once, waits for detail and live-state probes,
+updates the cache, emits observed transitions, and exits. Unavailable hosts keep
+their cached rows rather than retrying indefinitely. This suits external timers.
+When every Rollcall process is closed, observation stops; a later refresh can
+detect a transition by comparing native state with its stored snapshot.
+
 ## Host Inventory
 
 The initial host inventory is derived from literal aliases in the user's
@@ -123,6 +169,15 @@ configuration files change.
 
 Aliases with the same effective `(hostname, user, port)` are one discovery
 target. The shortest literal alias is used as the canonical probe name.
+
+To inspect a different SSH configuration without connecting to hosts:
+
+```sh
+rollcall hosts --config /path/to/ssh-config --json
+```
+
+Both whitespace and optional `=` separators are supported in `Host` and
+`Include` directives. An equals sign within an include path is preserved.
 
 ## Codex Adapter
 
@@ -182,6 +237,13 @@ tail scan as portable fallbacks.
 
 Codex control-plane IDs have the form `HOST:codex:THREAD_ID`.
 
+## Oh My Pi Adapter
+
+OMP sessions use the same dashboard, ownership rules, attention, and archive
+model. Rollcall resumes them with `omp --resume`. For an OMP session already
+running in tmux, it correlates the native resume ID from the agent process and
+attaches to that pane rather than creating another `rc-omp-*` container.
+
 ## Tmux Adapter
 
 Tmux is the native process container and terminal handoff mechanism, not the
@@ -194,6 +256,12 @@ Raw tmux IDs have the form `HOST:tmux:NAME`. Attachment remains native:
 - Inside local tmux, switch the current client.
 - Outside local tmux, attach normally.
 - For a remote session, allocate a terminal over SSH and run tmux attach there.
+
+```sh
+rollcall tmux
+rollcall tmux --host HOST
+rollcall attach HOST:tmux:NAME
+```
 
 When attaching to a live Codex thread, Rollcall selects the exact correlated
 pane before attaching. When resuming an unloaded thread, Rollcall atomically
@@ -250,6 +318,24 @@ failure marks the session unread. Repeated identical snapshots do not retrigger
 the event. Initial discovery also does not make every historical session
 unread. Manual archives suppress later notifications until restored.
 
+`rollcall history` queries this cache without contacting hosts, combining active
+and archived sessions in native-interaction chronology:
+
+```sh
+rollcall history
+rollcall history --search "rollcall ownership"
+rollcall history --host HOST --limit 20
+rollcall history --json --search kubernetes
+```
+
+The state database uses the first configured location:
+
+1. `$ROLLCALL_STATE_PATH`
+2. `$XDG_STATE_HOME/rollcall/rollcall.db`
+3. `~/.local/state/rollcall/rollcall.db`
+
+Use `ROLLCALL_STATE_PATH` for isolated runs and tests.
+
 ## Archive Projection
 
 Archive state belongs to Rollcall rather than tmux or a coding-agent harness.
@@ -296,12 +382,13 @@ agent UI. It can own the current terminal briefly or run inside
 `tmux display-popup`, but selection always exits the alternate screen before
 executing the native handoff.
 
-The default projection combines all configured hosts and groups rows beneath
-`directory / host` headings. The host menu filters that shared projection.
-Active and Settled tabs use the same grouping and search behavior.
+The dashboard combines all configured hosts into activity/recency sections:
+Currently active, Last day, Last week, and Archive. Hosts and project directories
+nest beneath each section. The host menu filters the shared projection; Tab and
+Space expand or collapse groups and sections rather than switching views.
 
 Session rows show only the activity marker, native title, latest agent message,
-and Codex interaction age. Working markers pulse; completed rows use a quiet
+and native interaction age. Working markers pulse; completed rows use a quiet
 muted checkmark. An unread transition adds a yellow dot and causes its project
 group to sort ahead of ordinary activity. Runtime, full path, and native
 identity are progressively disclosed through the optional detail strip. A
@@ -330,3 +417,22 @@ The picker implementation is split by responsibility:
 Dashboard rows hold indices into the current session snapshots. Mutations that
 replace those snapshots must capture the selected session's stable identity
 before reloading, then rebuild rows using that identity rather than stale indices.
+
+## Development
+
+Enter the pinned toolchain with `nix develop`, then run:
+
+```sh
+cargo fmt --check
+cargo test --locked --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+nix flake check
+```
+
+[GitHub Actions](../.github/workflows/ci.yml) runs formatting, tests, and Clippy
+with stable Rust on Ubuntu for pull requests and pushes to `main`. Nix flake
+checks remain a separate local check.
+
+Keep UI changes grounded in the real picker: exercise keyboard navigation,
+dialogs, resizing, and terminal handoff in addition to automated checks. Use an
+isolated `ROLLCALL_STATE_PATH` when a smoke run should not change your history.
