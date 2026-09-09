@@ -553,7 +553,7 @@ impl PickerApp {
             if let Some(preview) = self.preview.as_mut() {
                 preview.notice = Some(message);
             } else {
-                self.status = Some(message);
+                self.notice = Some((message, Instant::now()));
             }
         }
         Ok(())
@@ -574,11 +574,14 @@ impl PickerApp {
         self.store.set_archived(session_id, archived)?;
         self.reload_snapshots()?;
         self.rebuild_rows_selecting(selection);
-        self.status = Some(if archived {
-            format!("Settled {title}.")
-        } else {
-            format!("Restored {title}.")
-        });
+        self.notice = Some((
+            if archived {
+                format!("Settled {title}.")
+            } else {
+                format!("Restored {title}.")
+            },
+            Instant::now(),
+        ));
         Ok(())
     }
 }

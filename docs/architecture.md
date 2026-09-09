@@ -115,6 +115,8 @@ Meaningful transitions mark a session unread: working/approval/input to
 completed, a new approval/input request, or a failure. The picker shows a yellow
 dot and prioritizes the session's group. Press `x` to mark it read; attaching or
 manually settling it also acknowledges attention.
+Read, settle, and restore confirmations use the footer's eight-second notice
+window, so routine inventory refreshes do not immediately overwrite them.
 
 While Rollcall runs, transitions and host recovery ring the terminal bell by
 default. Set a local notification hook instead:
