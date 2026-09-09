@@ -111,15 +111,28 @@ fn visit_config(
     };
 
     for line in contents.lines() {
-        let Some(words) = shlex::split(line) else {
+        let line = line.trim_start();
+        let Some((keyword, arguments)) =
+            line.split_once(|character: char| character.is_ascii_whitespace() || character == '=')
+        else {
             continue;
         };
-        let Some((keyword, arguments)) = words.split_first() else {
+        // Only the keyword separator is special; include paths may contain '='.
+        let arguments = arguments.trim_start();
+        let arguments = if line.as_bytes()[keyword.len()] == b'=' {
+            arguments
+        } else {
+            arguments
+                .strip_prefix('=')
+                .unwrap_or(arguments)
+                .trim_start()
+        };
+        let Some(arguments) = shlex::split(arguments) else {
             continue;
         };
 
         if keyword.eq_ignore_ascii_case("host") {
-            for alias in arguments {
+            for alias in &arguments {
                 if is_literal_alias(alias) {
                     aliases
                         .entry(alias.clone())
@@ -127,7 +140,7 @@ fn visit_config(
                 }
             }
         } else if keyword.eq_ignore_ascii_case("include") {
-            for include in arguments {
+            for include in &arguments {
                 for included_path in expand_include(include, include_base, home)? {
                     visit_config(&included_path, include_base, home, visited, aliases)?;
                 }
@@ -311,6 +324,28 @@ Host -invalid
         assert_eq!(
             aliases.keys().cloned().collect::<Vec<_>>(),
             ["laptop", "topo"]
+        );
+    }
+
+    #[test]
+    fn discovers_equals_separated_hosts_and_includes() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let config = directory.path().join("config");
+        fs::write(
+            &config,
+            "Host=compact\nHost = spaced\nHost= after\nHost =before\n\
+             Include=\"extra=hosts.conf\"\n",
+        )
+        .expect("config should be written");
+        fs::write(directory.path().join("extra=hosts.conf"), "Host included\n")
+            .expect("included config should be written");
+
+        let aliases = discover_aliases(&config, directory.path(), directory.path())
+            .expect("aliases should be discovered");
+
+        assert_eq!(
+            aliases.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["after", "before", "compact", "included", "spaced"]
         );
     }
 

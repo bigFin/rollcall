@@ -302,7 +302,7 @@ Active and Settled tabs use the same grouping and search behavior.
 
 Session rows show only the activity marker, native title, latest agent message,
 and Codex interaction age. Working markers pulse; completed rows use a quiet
-dim checkmark. An unread transition adds a yellow dot and causes its project
+muted checkmark. An unread transition adds a yellow dot and causes its project
 group to sort ahead of ordinary activity. Runtime, full path, and native
 identity are progressively disclosed through the optional detail strip. A
 loaded-outside-tmux row is visible for awareness and follows the explicit
@@ -314,7 +314,19 @@ scrolling, attach/resume, and settle/restore without turning Rollcall into a
 conversation renderer. Capture failures retain the cached fallback and explain
 the live error.
 
-Ordinary text deliberately uses the terminal's default foreground/background.
-Secondary metadata uses the terminal `DIM` attribute, and selected rows use
-reverse video. Accent colors are reserved for lifecycle and connectivity state,
-which avoids unreadable hard-coded dark text on transparent terminal themes.
+The picker uses Everforest Dark's medium-contrast RGB palette rather than
+terminal-dependent ANSI colors. Text, metadata, selection backgrounds, status
+accents, and overlays share the palette in `src/picker/view/theme.rs`.
+
+The picker implementation is split by responsibility:
+
+- `src/picker/mod.rs`: public entry points, terminal lifecycle, and shared state.
+- `src/picker/input.rs`: keyboard modes, selection actions, and preview requests.
+- `src/picker/dashboard.rs`: grouping, filtering, ordering, and row selection.
+- `src/picker/refresh.rs`: host scheduling, observations, and persisted state updates.
+- `src/picker/view/`: dashboard layout, rows, overlays, text formatting, and theme.
+- `src/picker/tests/`: behavior tests grouped by the same responsibilities.
+
+Dashboard rows hold indices into the current session snapshots. Mutations that
+replace those snapshots must capture the selected session's stable identity
+before reloading, then rebuild rows using that identity rather than stale indices.

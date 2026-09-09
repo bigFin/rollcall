@@ -96,6 +96,13 @@ interaction age. Runtime and native identifiers stay out of the default view
 and are available in the optional detail strip. Cached sessions remain visible
 while a host is offline.
 
+The picker uses [Everforest Dark](https://github.com/sainnhe/everforest)
+(medium contrast): a dark green-gray background, warm text, muted metadata,
+and green selection highlights. It emits explicit RGB colors, so use a
+truecolor-capable terminal (and truecolor passthrough when running in tmux).
+The palette applies to the dashboard, details, and dialogs; there is currently
+no theme selector.
+
 Picker keys:
 
 ```text
@@ -237,8 +244,10 @@ testing.
 ## SSH Host Discovery
 
 `rollcall hosts` reads literal `Host` aliases from `~/.ssh/config` and its
-`Include` files. Wildcard and negated patterns are configuration rules rather
-than selectable hosts, so they are intentionally omitted.
+`Include` files. Both whitespace and optional `=` separators are supported
+(for example, `Host topo` and `Host=topo`). Wildcard and negated patterns are
+configuration rules rather than selectable hosts, so they are intentionally
+omitted.
 
 For each alias, the local OpenSSH client resolves the effective hostname, user,
 port, and identity files with `ssh -G`. This does not connect to the host and

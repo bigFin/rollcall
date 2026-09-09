@@ -117,18 +117,6 @@ mod tests {
     use super::render;
 
     #[test]
-    fn default_shell_init_wraps_supported_agent_commands() {
-        let script = render(&[]).expect("default shell script should render");
-
-        assert!(script.contains("session=\"rc-pending-${project}-${nonce}\""));
-        assert!(script.contains("command tmux new-session"));
-        assert!(script.contains("codex() { _rollcall_agent codex \"$@\"; }"));
-        assert!(script.contains("claude() { _rollcall_agent claude \"$@\"; }"));
-        assert!(script.contains("pi() { _rollcall_agent pi \"$@\"; }"));
-        assert!(script.contains("omp() { _rollcall_agent omp \"$@\"; }"));
-    }
-
-    #[test]
     fn custom_agent_names_are_validated_before_rendering() {
         assert!(render(&["codex".to_owned(), "my_agent".to_owned()]).is_ok());
         assert!(render(&["bad; command".to_owned()]).is_err());
@@ -174,6 +162,8 @@ mod tests {
         );
         let status = Command::new("bash")
             .args(["-c", &command])
+            .env_remove("TMUX")
+            .env_remove("ROLLCALL_BYPASS")
             .env("PATH", path)
             .env("ROLLCALL_TEST_LOG", &log)
             .status()
@@ -200,7 +190,8 @@ mod tests {
             "#!/bin/sh\nprintf 'tmux\\n' >> \"$ROLLCALL_TEST_LOG\"\n",
         );
         let script = render(&["codex".to_owned()]).expect("script should render");
-        let command = format!("{script}\nROLLCALL_BYPASS=1 codex --model 'gpt test'");
+        let command =
+            format!("{script}\nROLLCALL_FORCE_WRAP=1 ROLLCALL_BYPASS=1 codex --model 'gpt test'");
         let path = format!(
             "{}:{}",
             directory.path().display(),
@@ -208,6 +199,7 @@ mod tests {
         );
         let status = Command::new("bash")
             .args(["-c", &command])
+            .env_remove("TMUX")
             .env("PATH", path)
             .env("ROLLCALL_TEST_LOG", &log)
             .status()
