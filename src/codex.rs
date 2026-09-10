@@ -366,7 +366,7 @@ pub(crate) fn available(host: &str) -> Result<bool, CodexError> {
                 source,
             })?
     } else {
-        let remote_command = shlex::try_join(["bash", "-c", command])?;
+        let remote_command = shlex::try_join(["bash", "-lc", command])?;
         Command::new("ssh")
             .args([
                 "-o",
@@ -719,7 +719,7 @@ pub(crate) fn observe_live(host: &str) -> Result<BTreeMap<String, LiveObservatio
                 source,
             })?
     } else {
-        let remote_command = shlex::try_join(["bash", "-c", LIVE_OBSERVATION_SCRIPT])?;
+        let remote_command = shlex::try_join(["bash", "-lc", LIVE_OBSERVATION_SCRIPT])?;
         Command::new("ssh")
             .args([
                 "-o",

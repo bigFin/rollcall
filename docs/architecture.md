@@ -253,6 +253,11 @@ primary session model. Raw inventory remains available for diagnostics. Local
 inventory comes from `tmux list-sessions`; a selected remote host is queried
 with the same command over SSH.
 
+Remote tmux commands run inside `bash -lc` so host-specific login environment
+(notably `TMUX_TMPDIR`, which relocates the tmux socket) resolves the same way
+as the session probes. Without this, inventory and attach can disagree about
+which tmux server exists.
+
 Raw tmux IDs have the form `HOST:tmux:NAME`. Attachment remains native:
 
 - Inside local tmux, switch the current client.

@@ -78,11 +78,11 @@ pub fn discover(host: &str) -> Result<Vec<TmuxSession>, TmuxError> {
                 source,
             })?
     } else {
-        let remote_command = shlex::try_join(
+        let remote_command = login_shell_command(&shlex::try_join(
             ["tmux", "list-sessions", "-F", SESSION_FORMAT]
                 .iter()
                 .copied(),
-        )?;
+        )?)?;
         Command::new("ssh")
             .args([
                 "-o",
@@ -341,7 +341,7 @@ fn resume_command_args(
         return Ok(("tmux", arguments));
     }
 
-    let remote_command = shlex::try_join([
+    let remote_command = login_shell_command(&shlex::try_join([
         "tmux",
         "new-session",
         "-A",
@@ -350,7 +350,7 @@ fn resume_command_args(
         "-c",
         cwd,
         &login_command,
-    ])?;
+    ])?)?;
     Ok((
         "ssh",
         vec![
@@ -367,6 +367,13 @@ fn is_missing_tmux_server(message: &str) -> bool {
         || message.contains("failed to connect to server")
         || message.contains("error connecting to")
         || message.contains("no sessions")
+}
+
+/// Remote tmux commands run inside a login shell so host-specific environment
+/// (notably `TMUX_TMPDIR`, which relocates the tmux socket) resolves the same
+/// way it does for the `bash -lc` session probes.
+fn login_shell_command(command: &str) -> Result<String, TmuxError> {
+    Ok(shlex::try_join(["bash", "-lc", command].iter().copied())?)
 }
 
 fn parse_session(host: &str, line: &str) -> Result<TmuxSession, TmuxError> {
@@ -455,11 +462,11 @@ fn attach_command(
         ));
     }
 
-    let remote_command = shlex::try_join(
+    let remote_command = login_shell_command(&shlex::try_join(
         ["tmux", "attach-session", "-t", &target.name]
             .iter()
             .copied(),
-    )?;
+    )?)?;
     Ok((
         "ssh",
         vec![
@@ -507,7 +514,7 @@ fn attach_pane_command(
         ));
     }
 
-    let remote_command = shlex::try_join(tmux_arguments)?;
+    let remote_command = login_shell_command(&shlex::try_join(tmux_arguments)?)?;
     Ok((
         "ssh",
         vec![
@@ -537,7 +544,7 @@ fn capture_pane_command(
         ));
     }
 
-    let remote_command = shlex::try_join(tmux_arguments)?;
+    let remote_command = login_shell_command(&shlex::try_join(tmux_arguments)?)?;
     Ok((
         "ssh",
         vec![
@@ -580,7 +587,7 @@ fn rename_session_command(
         ));
     }
 
-    let remote_command = shlex::try_join(tmux_arguments)?;
+    let remote_command = login_shell_command(&shlex::try_join(tmux_arguments)?)?;
     Ok((
         "ssh",
         vec![
@@ -633,7 +640,7 @@ fn resume_codex_command(
         return Ok(("tmux", arguments));
     }
 
-    let remote_command = shlex::try_join([
+    let remote_command = login_shell_command(&shlex::try_join([
         "tmux",
         "new-session",
         "-A",
@@ -642,7 +649,7 @@ fn resume_codex_command(
         "-c",
         cwd,
         &login_command,
-    ])?;
+    ])?)?;
     Ok((
         "ssh",
         vec![
@@ -728,8 +735,10 @@ mod tests {
 
         assert_eq!(program, "ssh");
         assert_eq!(&arguments[..3], ["-t", "--", "topo"]);
+        let outer = shlex::split(&arguments[3]).expect("remote command should parse");
+        assert_eq!(&outer[..2], ["bash", "-lc"]);
         assert_eq!(
-            shlex::split(&arguments[3]).expect("remote command should parse"),
+            shlex::split(&outer[2]).expect("inner tmux command should parse"),
             ["tmux", "attach-session", "-t", "agent review; false"]
         );
     }
@@ -794,8 +803,10 @@ mod tests {
 
         assert_eq!(program, "ssh");
         assert_eq!(&arguments[..3], ["-t", "--", "coda"]);
+        let outer = shlex::split(&arguments[3]).expect("remote tmux command should parse");
+        assert_eq!(&outer[..2], ["bash", "-lc"]);
         assert_eq!(
-            shlex::split(&arguments[3]).expect("remote tmux command should parse"),
+            shlex::split(&outer[2]).expect("inner tmux command should parse"),
             [
                 "tmux",
                 "select-window",
@@ -840,9 +851,11 @@ mod tests {
 
         assert_eq!(program, "ssh");
         assert!(arguments.iter().any(|argument| argument == "BatchMode=yes"));
+        let outer = shlex::split(arguments.last().expect("remote command"))
+            .expect("remote command should parse");
+        assert_eq!(&outer[..2], ["bash", "-lc"]);
         assert_eq!(
-            shlex::split(arguments.last().expect("remote command"))
-                .expect("remote command should parse"),
+            shlex::split(&outer[2]).expect("inner tmux command should parse"),
             [
                 "tmux",
                 "capture-pane",
@@ -896,8 +909,10 @@ mod tests {
 
         assert_eq!(program, "ssh");
         assert_eq!(&arguments[..3], ["-T", "--", "coda"]);
+        let outer = shlex::split(&arguments[3]).expect("remote rename should parse");
+        assert_eq!(&outer[..2], ["bash", "-lc"]);
         assert_eq!(
-            shlex::split(&arguments[3]).expect("remote rename should parse"),
+            shlex::split(&outer[2]).expect("inner rename should parse"),
             [
                 "tmux",
                 "rename-session",
@@ -989,8 +1004,10 @@ mod tests {
 
         assert_eq!(program, "ssh");
         assert_eq!(&arguments[..3], ["-t", "--", "coda"]);
-        let remote =
+        let outer =
             shlex::split(&arguments[3]).expect("remote command should remain one safe command");
+        assert_eq!(&outer[..2], ["bash", "-lc"]);
+        let remote = shlex::split(&outer[2]).expect("inner remote command should parse");
         assert_eq!(
             &remote[..7],
             [

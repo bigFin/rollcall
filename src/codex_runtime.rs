@@ -240,7 +240,7 @@ fn run_host_script(host: &str, script: &str) -> Result<String, RuntimeError> {
                 source,
             })?
     } else {
-        let remote_command = shlex::try_join(["bash", "-c", script]).map_err(|error| {
+        let remote_command = shlex::try_join(["bash", "-lc", script]).map_err(|error| {
             RuntimeError::CommandFailed {
                 context: "quoting the remote Codex runtime command",
                 message: error.to_string(),
