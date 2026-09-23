@@ -447,13 +447,23 @@ The picker defaults to the terminal's foreground, background, and ANSI palette.
 Secondary text is dimmed and selection uses reverse video, leaving light, dark,
 and transparent backgrounds under terminal control. `ROLLCALL_THEME=everforest`
 selects the original Everforest Dark medium-contrast RGB palette;
-`ROLLCALL_THEME=terminal` explicitly selects the default. Unknown names are
+`ROLLCALL_THEME=terminal` explicitly selects the default. `ROLLCALL_THEME=tmux`
+opts into tmux style detection in `src/picker/view/tmux.rs`, with terminal
+fallbacks for missing colors or unavailable tmux styles. Unknown names are
 rejected before opening the terminal or probing hosts. The choice is resolved
 once per picker process and explicitly forwarded to tmux popup children.
 
 Text, metadata, selections, status accents, and overlays share the semantic
 palette in `src/picker/view/theme.rs`. Theme tests cover color roles, selection
 contrast, popup propagation, and rendered views at different terminal sizes.
+
+The popup coordinator passes a temporary selection file to the picker child.
+The child writes the selected session ID and exits; attachment begins only
+after tmux closes the overlay. Local attachment targets the originating client.
+Remote attachment uses `detach-client -E` to replace that client with SSH and
+then reattach to its original local session and socket. A nonzero SSH exit waits
+for Enter before returning, so errors remain visible. The temporary file is
+removed on completion, cancellation, or failure.
 
 The picker implementation is split by responsibility:
 

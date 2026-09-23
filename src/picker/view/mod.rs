@@ -2,6 +2,7 @@ mod overlays;
 mod rows;
 pub(in crate::picker) mod text;
 pub(in crate::picker) mod theme;
+mod tmux;
 
 use ratatui::{
     Frame,

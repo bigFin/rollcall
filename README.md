@@ -87,10 +87,16 @@ To explicitly use the terminal palette:
 ROLLCALL_THEME=terminal rollcall
 ```
 
+Use `ROLLCALL_THEME=tmux` to borrow colors from tmux instead. It reads
+`popup-style` (falling back to `status-style`), `popup-border-style`, and the
+current/activity/bell window styles. Missing colors keep their terminal
+defaults. Outside tmux, this mode behaves like `terminal`.
+
 Export `ROLLCALL_THEME` in your shell configuration to keep a preference.
-Everforest uses RGB colors and needs a truecolor-capable terminal. Both modes
+Everforest uses RGB colors and needs a truecolor-capable terminal. All modes
 apply to the dashboard, menus, previews, and `rollcall popup`. Reopen the picker
-after changing the setting. Custom theme files are not supported yet.
+after changing the setting or tmux styles. Custom theme files are not supported
+yet.
 
 ## Shell and tmux
 
@@ -105,14 +111,24 @@ they run the native command normally. Set `ROLLCALL_BYPASS=1` to bypass wrapping
 Wrapping a command does not add a discovery adapter for it—Claude discovery is
 not implemented.
 
-Run `rollcall popup` inside tmux for an overlay. For a key binding:
+Run `rollcall popup` inside tmux for an overlay, or bind it to prefix-k:
 
 ```tmux
-bind-key F2 display-popup -E -w 90% -h 80% 'rollcall pick'
+bind-key k run-shell -b 'ROLLCALL_TMUX_CLIENT=#{q:client_name} rollcall popup'
 ```
 
+Use the popup command rather than wrapping `rollcall pick` in `display-popup`.
+It closes the overlay before attaching and targets the client that opened it.
+Remote selections replace that client with SSH; the local session keeps
+running. Detaching remotely returns you to the original local session and
+socket. If SSH fails, press Enter after reading the error to return. Escape in
+the picker cancels without detaching.
+
+Remote tmux commands run through `bash -lc` so the host's login settings,
+including `TMUX_TMPDIR` and `PATH`, take effect.
+
 Tmux key bindings use the server's environment. To choose a theme for this
-binding, put `ROLLCALL_THEME=everforest` before `rollcall pick` in the command.
+binding, add `ROLLCALL_THEME=tmux` before `rollcall popup` in the command.
 
 ## Pi and Hermes
 

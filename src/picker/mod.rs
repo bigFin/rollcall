@@ -21,6 +21,7 @@ use crate::{
     hosts::HostDiscoveryError,
     reconnect::HostReconnectState,
     store::{SessionTransition, Store, StoreError},
+    tmux,
 };
 
 mod dashboard;
@@ -94,8 +95,15 @@ pub fn run(initial_host: &str, limit: usize) -> Result<(), PickerError> {
     let mut app = PickerApp::new(initial_host, limit)?;
     let selection = run_terminal(&mut app)?;
     if let Some(session_id) = selection {
-        agents::attach(&session_id)?;
-        app.acknowledge_session(&session_id, false)?;
+        if let Some(path) = env::var_os("ROLLCALL_PICK_SELECTION") {
+            std::fs::write(
+                path,
+                serde_json::to_vec(&session_id).map_err(io::Error::other)?,
+            )?;
+        } else {
+            agents::attach(&session_id)?;
+            app.acknowledge_session(&session_id, false)?;
+        }
     }
     Ok(())
 }
@@ -126,6 +134,9 @@ pub fn popup(initial_host: &str, limit: usize) -> Result<(), PickerError> {
         return run(initial_host, limit);
     }
 
+    let selection = tempfile::NamedTempFile::new()?;
+    let client =
+        tmux::origin_client().map_err(|error| PickerError::PopupFailed(error.to_string()))?;
     let executable = env::current_exe()?;
     let executable = executable.to_string_lossy().into_owned();
     let limit = limit.to_string();
@@ -142,8 +153,16 @@ pub fn popup(initial_host: &str, limit: usize) -> Result<(), PickerError> {
         .args([
             "display-popup",
             "-E",
+            "-c",
+            &client,
             "-e",
             &format!("ROLLCALL_THEME={theme}"),
+            "-e",
+            &format!("ROLLCALL_PICK_SELECTION={}", selection.path().display()),
+            "-e",
+            &format!("ROLLCALL_TMUX_CLIENT={client}"),
+            "-T",
+            " Rollcall · coding sessions ",
             "-w",
             "90%",
             "-h",
@@ -155,11 +174,26 @@ pub fn popup(initial_host: &str, limit: usize) -> Result<(), PickerError> {
         .stderr(Stdio::inherit())
         .status()?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        Err(PickerError::PopupFailed(status.to_string()))
+    if !status.success() {
+        return Err(PickerError::PopupFailed(status.to_string()));
     }
+    let contents = std::fs::read(selection.path())?;
+    if !contents.is_empty() {
+        let session_id: String = serde_json::from_slice(&contents).map_err(io::Error::other)?;
+        // Attach only after display-popup returns and the overlay is gone.
+        let status = Command::new(&executable)
+            .args(["attach", &session_id])
+            .env("ROLLCALL_TMUX_CLIENT", &client)
+            .env_remove("ROLLCALL_PICK_SELECTION")
+            .status()?;
+        if !status.success() {
+            return Err(PickerError::PopupFailed(format!(
+                "attachment failed: {status}"
+            )));
+        }
+        Store::open()?.acknowledge(&session_id)?;
+    }
+    Ok(())
 }
 
 fn run_terminal(app: &mut PickerApp) -> Result<Option<String>, PickerError> {
@@ -196,7 +230,10 @@ fn event_loop(
         app.expire_notice();
         app.maybe_start_host_refreshes();
         app.maybe_start_activity_poll();
-        terminal.draw(|frame| view::draw(frame, app))?;
+        terminal.draw(|frame| {
+            view::draw(frame, app);
+            view::theme::apply(frame.buffer_mut());
+        })?;
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }

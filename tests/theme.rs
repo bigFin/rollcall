@@ -7,11 +7,13 @@ fn popup_forwards_the_selected_theme_to_the_tmux_server() {
     fs::write(&tmux, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TRACE\"\n").unwrap();
     fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
     let trace = directory.path().join("trace");
-    for value in [None, Some("terminal"), Some(" EVERFOREST ")] {
+    for value in [None, Some("terminal"), Some(" EVERFOREST "), Some("tmux")] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rollcall"));
         command
             .arg("popup")
             .env("TMUX", "test-socket,123,0")
+            .env("ROLLCALL_TMUX_CLIENT", "/dev/pts/origin")
+            .env_remove("ROLLCALL_PICK_SELECTION")
             .env("TRACE", &trace)
             .env(
                 "PATH",
@@ -32,10 +34,10 @@ fn popup_forwards_the_selected_theme_to_the_tmux_server() {
             String::from_utf8_lossy(&output.stderr)
         );
         let args = fs::read_to_string(&trace).unwrap();
-        let expected = if value == Some(" EVERFOREST ") {
-            "everforest"
-        } else {
-            "terminal"
+        let expected = match value {
+            Some(" EVERFOREST ") => "everforest",
+            Some("tmux") => "tmux",
+            _ => "terminal",
         };
         assert!(
             args.contains(&format!("-e\nROLLCALL_THEME={expected}\n")),
@@ -56,7 +58,7 @@ fn invalid_theme_fails_before_opening_the_terminal_or_starting_probes() {
         assert!(!output.status.success());
         assert!(
             String::from_utf8_lossy(&output.stderr)
-                .contains("ROLLCALL_THEME must be terminal or everforest")
+                .contains("ROLLCALL_THEME must be terminal, everforest, or tmux")
         );
         assert!(output.stdout.is_empty());
     }

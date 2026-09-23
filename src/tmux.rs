@@ -133,14 +133,133 @@ pub fn discover(host: &str) -> Result<Vec<TmuxSession>, TmuxError> {
     Ok(sessions)
 }
 
+pub fn origin_client() -> Result<String, TmuxError> {
+    if let Ok(client) = env::var("ROLLCALL_TMUX_CLIENT")
+        && !client.is_empty()
+    {
+        return Ok(client);
+    }
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "#{client_name}"])
+        .output()
+        .map_err(|source| TmuxError::Start {
+            program: "tmux",
+            source,
+        })?;
+    let client = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || client.is_empty() {
+        return Err(TmuxError::CommandFailed {
+            context: "finding the originating tmux client".to_owned(),
+            message: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(client)
+}
+
+fn target_client(arguments: Vec<String>, client: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        result.push(argument.clone());
+        if argument == "switch-client" && (index == 0 || arguments[index - 1] == ";") {
+            result.extend(["-c".to_owned(), client.to_owned()]);
+        }
+    }
+    result
+}
+
+fn remote_client_command(
+    arguments: &[String],
+    session: &str,
+    socket: &str,
+) -> Result<String, TmuxError> {
+    let ssh = shlex::try_join(
+        ["env", "-u", "TMUX", "-u", "TMUX_PANE", "ssh"]
+            .into_iter()
+            .chain(arguments.iter().map(String::as_str)),
+    )?;
+    let return_to_tmux = shlex::try_join([
+        "exec",
+        "env",
+        "-u",
+        "TMUX",
+        "-u",
+        "TMUX_PANE",
+        "tmux",
+        "-S",
+        socket,
+        "attach-session",
+        "-t",
+        session,
+    ])?;
+    Ok(format!(
+        "{ssh}; status=$?; if [ \"$status\" -ne 0 ]; then printf '\\nRollcall: SSH exited with status %s. Press Enter to return to tmux.\\n' \"$status\"; read -r reply; fi; {return_to_tmux}"
+    ))
+}
+
+fn execute_attachment(
+    program: &'static str,
+    arguments: Vec<String>,
+) -> Result<std::process::ExitStatus, TmuxError> {
+    // Remote command builders already wrap their commands in a login shell.
+    let popup_client = env::var("ROLLCALL_TMUX_CLIENT")
+        .ok()
+        .filter(|value| !value.is_empty());
+    if let Some(client) = popup_client
+        .as_deref()
+        .filter(|_| program == "ssh" && env::var_os("TMUX").is_some())
+    {
+        let clients = Command::new("tmux")
+            .args([
+                "list-clients",
+                "-F",
+                "#{client_name}\t#{session_id}\t#{socket_path}",
+            ])
+            .output()
+            .map_err(|source| TmuxError::Start {
+                program: "tmux",
+                source,
+            })?;
+        let listing = String::from_utf8_lossy(&clients.stdout);
+        let (session, socket) = listing
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                Some((fields.next()?, fields.next()?, fields.next()?))
+            })
+            .find_map(|(name, session, socket)| (name == client).then_some((session, socket)))
+            .filter(|_| clients.status.success())
+            .ok_or_else(|| TmuxError::CommandFailed {
+                context: "finding the popup client's session".to_owned(),
+                message: format!("client {client:?} is no longer attached"),
+            })?;
+        let command = remote_client_command(&arguments, session, socket)?;
+        return Command::new("tmux")
+            .args(["detach-client", "-t", client, "-E", &command])
+            .status()
+            .map_err(|source| TmuxError::Start {
+                program: "tmux",
+                source,
+            });
+    }
+    let arguments = if program == "tmux" {
+        match popup_client {
+            Some(client) => target_client(arguments, &client),
+            None => arguments,
+        }
+    } else {
+        arguments
+    };
+    Command::new(program)
+        .args(arguments)
+        .status()
+        .map_err(|source| TmuxError::Start { program, source })
+}
+
 pub fn attach(session: &str) -> Result<(), TmuxError> {
     let target = parse_target(session)?;
     let (program, arguments) =
         attach_command(&target, env::var_os("TMUX").is_some(), &local_hostname())?;
-    let status = Command::new(program)
-        .args(&arguments)
-        .status()
-        .map_err(|source| TmuxError::Start { program, source })?;
+    let status = execute_attachment(program, arguments)?;
 
     if status.success() {
         Ok(())
@@ -163,10 +282,7 @@ pub fn attach_pane(host: &str, session_name: &str, pane: &str) -> Result<(), Tmu
         env::var_os("TMUX").is_some(),
         &local_hostname(),
     )?;
-    let status = Command::new(program)
-        .args(&arguments)
-        .status()
-        .map_err(|source| TmuxError::Start { program, source })?;
+    let status = execute_attachment(program, arguments)?;
 
     if status.success() {
         Ok(())
@@ -262,10 +378,7 @@ pub fn resume_codex(
         inside_tmux,
         &local_hostname,
     )?;
-    let status = Command::new(program)
-        .args(&arguments)
-        .status()
-        .map_err(|source| TmuxError::Start { program, source })?;
+    let status = execute_attachment(program, arguments)?;
 
     if status.success() {
         Ok(())
@@ -297,10 +410,7 @@ pub fn resume_command(
         env::var_os("TMUX").is_some(),
         &local_hostname(),
     )?;
-    let status = Command::new(program)
-        .args(&arguments)
-        .status()
-        .map_err(|source| TmuxError::Start { program, source })?;
+    let status = execute_attachment(program, arguments)?;
     if status.success() {
         Ok(())
     } else {
@@ -484,7 +594,7 @@ fn attach_pane_command(
     inside_tmux: bool,
     local_hostname: &str,
 ) -> Result<(&'static str, Vec<String>), TmuxError> {
-    let action = if inside_tmux {
+    let action = if inside_tmux && (target.host == "local" || target.host == local_hostname) {
         "switch-client"
     } else {
         "attach-session"
@@ -790,6 +900,84 @@ mod tests {
                 "fabric"
             ]
         );
+    }
+
+    #[test]
+    fn remote_client_returns_to_exact_socket_after_success_or_failure() {
+        use std::{
+            fs,
+            io::Write,
+            os::unix::fs::PermissionsExt,
+            process::{Command, Stdio},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            (
+                "ssh",
+                "#!/bin/sh\ntest -z \"${TMUX-}\" || exit 99\nexit \"$SSH_STATUS\"\n",
+            ),
+            (
+                "tmux",
+                "#!/bin/sh\ntest -z \"${TMUX-}\" || exit 99\nprintf '<%s>' \"$@\"\n",
+            ),
+        ] {
+            let path = directory.path().join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let command = super::remote_client_command(
+            &[
+                "-t".into(),
+                "--".into(),
+                "remote".into(),
+                "exec bash -lc 'tmux attach'".into(),
+            ],
+            "$4",
+            "/tmp/a socket/default",
+        )
+        .unwrap();
+        for status in ["0", "42"] {
+            let mut child = Command::new("sh")
+                .args(["-c", &command])
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        directory.path().display(),
+                        std::env::var("PATH").unwrap()
+                    ),
+                )
+                .env("TMUX", "outer-socket,123,0")
+                .env("SSH_STATUS", status)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(b"\n").unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                text.ends_with("<-S></tmp/a socket/default><attach-session><-t><$4>"),
+                "{text}"
+            );
+            assert_eq!(text.contains("SSH exited with status 42"), status == "42");
+        }
+    }
+
+    #[test]
+    fn remote_pane_attachment_from_local_tmux_attaches_on_the_remote_host() {
+        let target = TmuxTarget {
+            host: "remote".to_owned(),
+            name: "agent".to_owned(),
+        };
+        let (program, arguments) = attach_pane_command(&target, "%19", true, "topo").unwrap();
+        assert_eq!(program, "ssh");
+        let login = shlex::split(arguments.last().unwrap()).unwrap();
+        assert_eq!(&login[..2], &["bash", "-lc"]);
+        let command = shlex::split(&login[2]).unwrap();
+        assert!(command.contains(&"attach-session".to_owned()));
+        assert!(!command.contains(&"switch-client".to_owned()));
     }
 
     #[test]

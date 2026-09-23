@@ -1,12 +1,18 @@
 use std::{env, io, sync::OnceLock};
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::{
+    buffer::Buffer,
+    style::{Color, Modifier, Style},
+};
+
+use super::tmux;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum Theme {
     #[default]
     Terminal,
     Everforest,
+    Tmux,
 }
 
 pub(super) struct Palette {
@@ -47,6 +53,7 @@ const EVERFOREST: Palette = Palette {
 };
 
 static THEME: OnceLock<Theme> = OnceLock::new();
+static TMUX_THEME: OnceLock<tmux::Theme> = OnceLock::new();
 
 // Resolve once before entering the alternate screen. Return the canonical name
 // so popup callers can explicitly forward it through tmux's server environment.
@@ -60,6 +67,10 @@ pub(in crate::picker) fn init() -> io::Result<&'static str> {
     Ok(match THEME.get_or_init(|| theme) {
         Theme::Terminal => "terminal",
         Theme::Everforest => "everforest",
+        Theme::Tmux => {
+            TMUX_THEME.get_or_init(tmux::Theme::detect);
+            "tmux"
+        }
     })
 }
 
@@ -73,16 +84,17 @@ impl Theme {
         {
             "" | "terminal" => Ok(Self::Terminal),
             "everforest" => Ok(Self::Everforest),
+            "tmux" => Ok(Self::Tmux),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "ROLLCALL_THEME must be terminal or everforest",
+                "ROLLCALL_THEME must be terminal, everforest, or tmux",
             )),
         }
     }
 
     const fn palette(self) -> &'static Palette {
         match self {
-            Self::Terminal => &TERMINAL,
+            Self::Terminal | Self::Tmux => &TERMINAL,
             Self::Everforest => &EVERFOREST,
         }
     }
@@ -100,7 +112,7 @@ impl Theme {
             .remove_modifier(Modifier::DIM)
             .add_modifier(Modifier::BOLD);
         match self {
-            Self::Terminal => style.add_modifier(Modifier::REVERSED),
+            Self::Terminal | Self::Tmux => style.add_modifier(Modifier::REVERSED),
             Self::Everforest => style,
         }
     }
@@ -108,7 +120,7 @@ impl Theme {
     fn muted_style(self) -> Style {
         let style = Style::default().fg(self.palette().muted);
         match self {
-            Self::Terminal => style.add_modifier(Modifier::DIM),
+            Self::Terminal | Self::Tmux => style.add_modifier(Modifier::DIM),
             Self::Everforest => style,
         }
     }
@@ -116,6 +128,12 @@ impl Theme {
 
 fn current() -> Theme {
     THEME.get().copied().unwrap_or_default()
+}
+
+pub(in crate::picker) fn apply(buffer: &mut Buffer) {
+    if let Some(theme) = TMUX_THEME.get() {
+        theme.apply(buffer);
+    }
 }
 
 pub(super) fn palette() -> &'static Palette {
@@ -146,6 +164,7 @@ mod tests {
             Theme::parse(Some(" EVERFOREST ")).unwrap(),
             Theme::Everforest
         );
+        assert_eq!(Theme::parse(Some("tmux")).unwrap(), Theme::Tmux);
         assert!(Theme::parse(Some("everforrest")).is_err());
     }
 
