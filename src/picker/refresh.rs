@@ -88,7 +88,7 @@ impl PickerApp {
             .filter(|session| session.host == observed_host)
             .map(|session| {
                 (
-                    session.native_session_id.clone(),
+                    session.id.clone(),
                     (
                         session.last_interaction_unix_seconds,
                         session.updated_unix_seconds,
@@ -333,7 +333,12 @@ impl PickerApp {
             if let Some(observation) = observations.get(&session.id) {
                 session.runtime = observation.runtime;
                 session.tmux.clone_from(&observation.tmux);
-                session.activity = merge_observed_activity(session.activity, observation.activity);
+                session.activity = if session.agent == crate::domain::AgentKind::Pi {
+                    // Pi's lifecycle bridge is authoritative, including approval -> working.
+                    observation.activity
+                } else {
+                    merge_observed_activity(session.activity, observation.activity)
+                };
             } else if session.runtime != RuntimeOwner::Resumable {
                 session.runtime = RuntimeOwner::Resumable;
                 session.tmux = None;
@@ -656,7 +661,7 @@ pub(super) fn session_needs_detail(
     cached: &BTreeMap<String, (u64, u64, bool)>,
 ) -> bool {
     cached
-        .get(&session.native_session_id)
+        .get(&session.id)
         .is_none_or(|(last_interaction, updated, has_message)| {
             !has_message
                 || *last_interaction != session.last_interaction_unix_seconds

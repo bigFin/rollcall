@@ -29,9 +29,10 @@ notifications and monitoring between picker invocations. If added, it should
 communicate over a Unix-domain socket and exit after an idle period rather than
 becoming mandatory infrastructure.
 
-Remote hosts require only their existing SSH server, tmux installation when
-used, and the coding-agent CLIs already present there. Probes and protocol
-clients are launched over SSH and live only while they are needed.
+Remote hosts require their existing SSH server, tmux installation when used,
+and the coding-agent CLIs already present there. Pi and Hermes probes also
+require Python 3 with its standard library. Probes and protocol clients are
+launched over SSH and live only while they are needed.
 
 ## Normalized Session Model
 
@@ -44,8 +45,8 @@ Harness-specific adapters normalize only:
 
 The stored session record, stable key, runtime ownership, activity state, tmux
 binding, and picker/store integration are harness-neutral. The adapter
-dispatcher currently routes those operations to Codex and OMP; each adapter
-owns native discovery, live observation, and attach/resume behavior.
+dispatcher currently routes those operations to Codex, OMP, Pi, and Hermes;
+each adapter owns native discovery, live observation, and attach/resume behavior.
 
 The control plane does not normalize conversation rendering, tools, subagents,
 approvals UI, model selection, or other harness-native behavior.
@@ -246,6 +247,40 @@ model. Rollcall resumes them with `omp --resume`. For an OMP session already
 running in tmux, it correlates the native resume ID from the agent process and
 attaches to that pane rather than creating another `rc-omp-*` container.
 
+## Pi and Hermes Adapters
+
+See [Pi and Hermes setup](native-adapters.md) for session paths, profile handling,
+and the optional Pi lifecycle extension.
+
+`native.rs` runs an embedded standard-library Python probe locally or through
+SSH. Pi reads JSONL entries as a stream, keeps only summary metadata, and uses
+message timestamps rather than filesystem touch time for chronology. Hermes
+opens each native SQLite database with `mode=ro`; optional columns are detected
+for compatibility with older schemas. It never imports Hermes, migrates a
+database, or creates an absent store. Profile-qualified Hermes IDs prevent
+sessions with the same native ID in different profiles from colliding.
+
+All adapter inventories are merged and globally sorted before the per-host
+limit is applied. The picker detail cache is keyed by the full control-plane ID,
+not the native ID shared by potentially different harnesses.
+
+Pi's optional `integrations/pi/rollcall.ts` extension publishes atomic,
+permission-restricted lifecycle records. The probe validates PID and Linux
+process start ticks, then resolves tmux ancestry only for terminal-mode Pi.
+The extension observes final `agent_settled`, not intermediate `agent_end`, and
+updates its record across session replacement. Without exact ownership evidence,
+Pi processes sharing a workspace prevent implicit resume; recency is never used
+to guess a pane binding. Custom session paths from verified records supplement
+the ordinary inventory.
+
+Hermes publishes native active-session leases. The probe validates their process
+creation time and only binds CLI surfaces to tmux; a desktop/shared server's pane
+is not a conversation frontend. Corrupt or unreadable ownership records prevent
+implicit resume. Live polls read only registered sessions rather than rescanning
+all historical transcripts. Discovery, attach, and explicit resume remain
+separate: attach rechecks ownership before handing off, while resume deliberately
+invokes the native CLI, which retains its own ownership checks.
+
 ## Tmux Adapter
 
 Tmux is the native process container and terminal handoff mechanism, not the
@@ -427,7 +462,12 @@ before reloading, then rebuild rows using that identity rather than stale indice
 
 ## Development
 
-Enter the pinned toolchain with `nix develop`, then run:
+Enter the pinned toolchain with `nix develop`, or run `direnv allow` once for
+automatic loading. The shell includes Rust, Bash, SSH, tmux, SQLite, Python 3,
+Node.js 24+, and Nix formatting tools. Opening it does not build Rollcall or
+fetch Cargo dependencies.
+
+Run:
 
 ```sh
 cargo fmt --check
@@ -437,8 +477,14 @@ nix flake check
 ```
 
 [GitHub Actions](../.github/workflows/ci.yml) runs formatting, tests, and Clippy
-with stable Rust on Ubuntu for pull requests and pushes to `main`. Nix flake
-checks remain a separate local check.
+with stable Rust, Node.js 24, and Python 3 on Ubuntu for pull requests and pushes
+to `main`. `cargo test` includes the Python probe and Pi extension tests. Nix
+flake checks remain a separate local check.
+
+Update pinned dependencies with `nix flake update` and `cargo update`. Cargo
+updates stay within the manifest's version ranges; incompatible releases need
+a `Cargo.toml` update too. Add new source files to Git before running Nix flake
+checks, since Git flakes exclude untracked files.
 
 Keep UI changes grounded in the real picker: exercise keyboard navigation,
 dialogs, resizing, and terminal handoff in addition to automated checks. Use an

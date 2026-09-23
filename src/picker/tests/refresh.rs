@@ -6,7 +6,7 @@ use std::{
 use super::{app_with_sessions, session};
 use crate::{
     agents,
-    domain::{Activity, LiveObservation, RuntimeOwner},
+    domain::{Activity, AgentKind, LiveObservation, RuntimeOwner},
     hosts::{ConnectivityState, SshHost},
     picker::{
         InputMode, PreviewContent, RefreshEvent,
@@ -166,6 +166,35 @@ fn live_observations_update_working_and_completed_state() {
 }
 
 #[test]
+fn pi_lifecycle_updates_approval_working_and_failure() {
+    let mut candidate = session("pi-live", "/work", "Pi");
+    candidate.host = agents::observed_host("local");
+    candidate.agent = AgentKind::Pi;
+    candidate.id = candidate.key().stable_id();
+    let id = candidate.id.clone();
+    let mut app = app_with_sessions(vec![candidate], Vec::new());
+    for activity in [
+        Activity::WaitingApproval,
+        Activity::Working,
+        Activity::Failed,
+    ] {
+        app.apply_live_observations(
+            "local",
+            &BTreeMap::from([(
+                id.clone(),
+                LiveObservation {
+                    activity,
+                    runtime: RuntimeOwner::ExternalFrontend,
+                    tmux: None,
+                },
+            )]),
+        )
+        .unwrap();
+        assert_eq!(app.active[0].activity, activity);
+    }
+}
+
+#[test]
 fn equivalent_ssh_aliases_are_probed_once_using_the_shortest_name() {
     let host = |alias: &str, hostname: &str| SshHost {
         alias: alias.to_owned(),
@@ -277,7 +306,7 @@ fn one_shot_watch_finishes_after_initial_work_drains() {
 fn unchanged_sessions_with_messages_skip_expensive_detail_reads() {
     let session = session("019f", "/fabric", "Rollcall");
     let cached = BTreeMap::from([(
-        session.native_session_id.clone(),
+        session.id.clone(),
         (
             session.last_interaction_unix_seconds,
             session.updated_unix_seconds,
@@ -289,10 +318,28 @@ fn unchanged_sessions_with_messages_skip_expensive_detail_reads() {
 }
 
 #[test]
+fn detail_cache_does_not_collide_between_agents() {
+    let codex = session("same-id", "/work", "Codex");
+    let mut pi = codex.clone();
+    pi.agent = AgentKind::Pi;
+    pi.id = pi.key().stable_id();
+    let cached = BTreeMap::from([(
+        pi.id.clone(),
+        (
+            pi.last_interaction_unix_seconds,
+            pi.updated_unix_seconds,
+            true,
+        ),
+    )]);
+    assert!(session_needs_detail(&codex, &cached));
+    assert!(!session_needs_detail(&pi, &cached));
+}
+
+#[test]
 fn changed_or_unseen_sessions_request_detail_reads() {
     let session = session("019f", "/fabric", "Rollcall");
     let stale = BTreeMap::from([(
-        session.native_session_id.clone(),
+        session.id.clone(),
         (
             session.last_interaction_unix_seconds.saturating_sub(1),
             session.updated_unix_seconds,

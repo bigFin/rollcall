@@ -1,7 +1,7 @@
 # rollcall
 
-Find and resume **Codex and Oh My Pi sessions** across your local machine and SSH
-hosts. Rollcall shows what is working, what needs attention, and where to pick up.
+Find and resume **Codex, Oh My Pi, Pi, and Hermes sessions** across your local
+machine and SSH hosts. Rollcall shows what is working, what needs attention, and where to pick up.
 Your agent's native terminal stays the workspace—no replacement chat UI.
 
 - Opens from a local cache; offline hosts do not block navigation.
@@ -21,7 +21,8 @@ cargo install --path . --locked
 
 Ensure Cargo's bin directory (normally `~/.cargo/bin`) is on your `PATH`.
 You need tmux and the relevant agent CLI on hosts running sessions, plus OpenSSH
-for remote access. Live process discovery currently uses Linux `/proc`.
+for remote access. Pi and Hermes discovery also need Python 3 on each host.
+Live process discovery currently uses Linux `/proc`.
 Remote hosts do **not** need Rollcall or a separately installed Rollcall service.
 
 ## Start here
@@ -76,7 +77,7 @@ inside tmux when needed. Add this to your shell configuration:
 eval "$(rollcall shell-init)"
 ```
 
-The wrappers cover `codex`, `claude`, `pi`, and `omp`; wrapping a command does not
+The wrappers cover `codex`, `claude`, `pi`, `omp`, and `hermes`; wrapping a command does not
 add a discovery adapter for it. Inside tmux or in scripts they run normally.
 Use `ROLLCALL_BYPASS=1` to bypass wrapping.
 
@@ -85,6 +86,17 @@ For a picker overlay, run `rollcall popup` or add this to `~/.tmux.conf`:
 ```tmux
 bind-key F2 display-popup -E -w 90% -h 80% 'rollcall pick'
 ```
+
+## Pi and Hermes
+
+Pi and Oh My Pi have separate inventories. Saved Pi sessions are discovered
+without extra setup; exact live status and tmux attachment need the optional
+[Pi lifecycle extension](docs/native-adapters.md#pi-live-status).
+
+Hermes sessions are read without changing its database. Profile-qualified IDs
+keep sessions from different profiles separate, and resume selects the original
+profile. See [Pi and Hermes setup](docs/native-adapters.md) for paths, host
+requirements, and ownership limitations.
 
 ## More
 

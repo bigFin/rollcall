@@ -4,6 +4,7 @@ pub mod codex;
 pub mod codex_runtime;
 pub mod domain;
 pub mod hosts;
+pub mod native;
 mod notify;
 pub mod omp;
 pub mod picker;

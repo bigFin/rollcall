@@ -6,6 +6,8 @@ pub enum AgentKind {
     #[default]
     Codex,
     Omp,
+    Pi,
+    Hermes,
 }
 
 impl AgentKind {
@@ -14,6 +16,8 @@ impl AgentKind {
         match self {
             Self::Codex => "codex",
             Self::Omp => "omp",
+            Self::Pi => "pi",
+            Self::Hermes => "hermes",
         }
     }
 
@@ -21,7 +25,9 @@ impl AgentKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "codex" => Some(Self::Codex),
-            "omp" | "pi" => Some(Self::Omp),
+            "omp" => Some(Self::Omp),
+            "pi" => Some(Self::Pi),
+            "hermes" => Some(Self::Hermes),
             _ => None,
         }
     }
@@ -171,6 +177,19 @@ mod tests {
             "stable IDs should round-trip"
         );
         assert!(SessionKey::parse("topo:unknown:019f").is_none());
+    }
+
+    #[test]
+    fn pi_omp_and_hermes_have_distinct_round_tripping_keys() {
+        for agent in [AgentKind::Pi, AgentKind::Omp, AgentKind::Hermes] {
+            let key = SessionKey {
+                host: "topo".to_owned(),
+                agent,
+                native_session_id: "main/session-1".to_owned(),
+            };
+            assert_eq!(SessionKey::parse(&key.stable_id()), Some(key));
+        }
+        assert_ne!(AgentKind::parse("pi"), AgentKind::parse("omp"));
     }
 
     #[test]

@@ -32,6 +32,14 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
 
+      - name: Install Node.js for Pi extension tests
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Check Python probe runtime
+        run: python3 --version
+
       - name: Check formatting
         run: cargo fmt --check
 
