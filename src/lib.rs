@@ -11,4 +11,5 @@ pub mod picker;
 mod reconnect;
 pub mod shell;
 pub mod store;
+mod theme;
 pub mod tmux;

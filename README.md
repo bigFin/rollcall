@@ -244,11 +244,29 @@ From an ordinary shell inside tmux:
 rollcall popup
 ```
 
-Or bind the picker directly as a lightweight overlay:
+Or bind the popup coordinator (prefix-k in this example):
 
 ```tmux
-bind-key F2 display-popup -E -w 90% -h 80% 'rollcall pick'
+bind-key k run-shell -b 'ROLLCALL_TMUX_CLIENT=#{q:client_name} rollcall popup'
 ```
+
+Use `rollcall popup`, rather than putting `rollcall pick` inside another
+`display-popup` command. The coordinator closes the overlay before attaching
+and targets the client that opened it. For remote selections, tmux replaces
+that client with SSH rather than creating a nested tmux window. The local
+session keeps running. Detaching from the remote host reattaches to the original
+local session and socket. If SSH fails, the error stays visible until you press
+Enter to return. Escape in the picker cancels without detaching.
+
+Remote attachment commands run through `bash -lc` so the host's login settings
+(such as `TMUX_TMPDIR` and PATH) match its normal interactive environment.
+
+The picker uses the terminal's palette and default background outside tmux.
+Inside tmux it also reads `popup-style` (falling back to `status-style`),
+`popup-border-style`, and the current/activity/bell window styles. These supply
+the background, text, accent, selection, and alert colors; unspecified colors
+keep their terminal defaults. Styles are read when the picker opens, so reopen
+it after changing the tmux theme.
 
 Archiving is reversible control-plane state, not deletion. `a` moves a selected
 session between Active and Settled while retaining its native identity,
