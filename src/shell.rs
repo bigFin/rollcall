@@ -1,6 +1,6 @@
 use std::{fmt, fmt::Write as _};
 
-const DEFAULT_AGENTS: &[&str] = &["codex", "claude", "pi", "omp"];
+const DEFAULT_AGENTS: &[&str] = &["codex", "claude", "pi", "omp", "hermes"];
 
 #[derive(Debug)]
 pub enum ShellError {
@@ -126,6 +126,7 @@ mod tests {
         assert!(script.contains("claude() { _rollcall_agent claude \"$@\"; }"));
         assert!(script.contains("pi() { _rollcall_agent pi \"$@\"; }"));
         assert!(script.contains("omp() { _rollcall_agent omp \"$@\"; }"));
+        assert!(script.contains("hermes() { _rollcall_agent hermes \"$@\"; }"));
     }
 
     #[test]
@@ -166,7 +167,10 @@ mod tests {
             "#!/bin/sh\nprintf 'tmux:' >> \"$ROLLCALL_TEST_LOG\"\nprintf '<%s>' \"$@\" >> \"$ROLLCALL_TEST_LOG\"\nprintf '\\n' >> \"$ROLLCALL_TEST_LOG\"\n",
         );
         let script = render(&["codex".to_owned()]).expect("script should render");
-        let command = format!("{script}\nROLLCALL_FORCE_WRAP=1 codex --model 'gpt test'");
+        // Exercise wrapping even when the test runner is inside tmux or bypassing wrappers.
+        let command = format!(
+            "{script}\nunset TMUX ROLLCALL_BYPASS\nROLLCALL_FORCE_WRAP=1 codex --model 'gpt test'"
+        );
         let path = format!(
             "{}:{}",
             directory.path().display(),
@@ -200,7 +204,10 @@ mod tests {
             "#!/bin/sh\nprintf 'tmux\\n' >> \"$ROLLCALL_TEST_LOG\"\n",
         );
         let script = render(&["codex".to_owned()]).expect("script should render");
-        let command = format!("{script}\nROLLCALL_BYPASS=1 codex --model 'gpt test'");
+        // Make bypass the only reason not to wrap (rather than tmux or non-TTY input).
+        let command = format!(
+            "{script}\nunset TMUX\nROLLCALL_FORCE_WRAP=1 ROLLCALL_BYPASS=1 codex --model 'gpt test'"
+        );
         let path = format!(
             "{}:{}",
             directory.path().display(),

@@ -996,7 +996,7 @@ impl PickerApp {
             .filter(|session| session.host == observed_host)
             .map(|session| {
                 (
-                    session.native_session_id.clone(),
+                    session.id.clone(),
                     (
                         session.last_interaction_unix_seconds,
                         session.updated_unix_seconds,
@@ -1241,7 +1241,12 @@ impl PickerApp {
             if let Some(observation) = observations.get(&session.id) {
                 session.runtime = observation.runtime;
                 session.tmux.clone_from(&observation.tmux);
-                session.activity = merge_observed_activity(session.activity, observation.activity);
+                session.activity = if session.agent == crate::domain::AgentKind::Pi {
+                    // Pi's lifecycle bridge is authoritative, including approval -> working.
+                    observation.activity
+                } else {
+                    merge_observed_activity(session.activity, observation.activity)
+                };
             } else if session.runtime != RuntimeOwner::Resumable {
                 session.runtime = RuntimeOwner::Resumable;
                 session.tmux = None;
@@ -2002,7 +2007,7 @@ fn write_transition(
 
 fn session_needs_detail(session: &Session, cached: &BTreeMap<String, (u64, u64, bool)>) -> bool {
     cached
-        .get(&session.native_session_id)
+        .get(&session.id)
         .is_none_or(|(last_interaction, updated, has_message)| {
             !has_message
                 || *last_interaction != session.last_interaction_unix_seconds
@@ -3483,6 +3488,35 @@ mod tests {
     }
 
     #[test]
+    fn pi_lifecycle_updates_approval_working_and_failure() {
+        let mut candidate = session("pi-live", "/work", "Pi");
+        candidate.host = agents::observed_host("local");
+        candidate.agent = AgentKind::Pi;
+        candidate.id = candidate.key().stable_id();
+        let id = candidate.id.clone();
+        let mut app = app_with_sessions(vec![candidate], Vec::new());
+        for activity in [
+            Activity::WaitingApproval,
+            Activity::Working,
+            Activity::Failed,
+        ] {
+            app.apply_live_observations(
+                "local",
+                &BTreeMap::from([(
+                    id.clone(),
+                    LiveObservation {
+                        activity,
+                        runtime: RuntimeOwner::ExternalFrontend,
+                        tmux: None,
+                    },
+                )]),
+            )
+            .unwrap();
+            assert_eq!(app.active[0].activity, activity);
+        }
+    }
+
+    #[test]
     fn working_sessions_sort_ahead_of_newer_completed_sessions() {
         let mut completed = session("019f", "/newer", "Completed");
         completed.last_interaction_unix_seconds = 200;
@@ -3624,7 +3658,7 @@ mod tests {
     fn unchanged_sessions_with_messages_skip_expensive_detail_reads() {
         let session = session("019f", "/fabric", "Rollcall");
         let cached = BTreeMap::from([(
-            session.native_session_id.clone(),
+            session.id.clone(),
             (
                 session.last_interaction_unix_seconds,
                 session.updated_unix_seconds,
@@ -3636,10 +3670,28 @@ mod tests {
     }
 
     #[test]
+    fn detail_cache_does_not_collide_between_agents() {
+        let codex = session("same-id", "/work", "Codex");
+        let mut pi = codex.clone();
+        pi.agent = AgentKind::Pi;
+        pi.id = pi.key().stable_id();
+        let cached = BTreeMap::from([(
+            pi.id.clone(),
+            (
+                pi.last_interaction_unix_seconds,
+                pi.updated_unix_seconds,
+                true,
+            ),
+        )]);
+        assert!(session_needs_detail(&codex, &cached));
+        assert!(!session_needs_detail(&pi, &cached));
+    }
+
+    #[test]
     fn changed_or_unseen_sessions_request_detail_reads() {
         let session = session("019f", "/fabric", "Rollcall");
         let stale = BTreeMap::from([(
-            session.native_session_id.clone(),
+            session.id.clone(),
             (
                 session.last_interaction_unix_seconds.saturating_sub(1),
                 session.updated_unix_seconds,

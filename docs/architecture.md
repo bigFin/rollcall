@@ -44,7 +44,7 @@ Harness-specific adapters normalize only:
 
 The stored session record, stable key, runtime ownership, activity state, tmux
 binding, and picker/store integration are harness-neutral. The adapter
-dispatcher currently routes those operations to Codex and OMP; each adapter
+dispatcher currently routes those operations to Codex, OMP, Pi, and Hermes; each adapter
 owns native discovery, live observation, and attach/resume behavior.
 
 The control plane does not normalize conversation rendering, tools, subagents,
@@ -181,6 +181,37 @@ GNU `tac` is preferred for efficient reverse reads, with `tail -r` and a bounded
 tail scan as portable fallbacks.
 
 Codex control-plane IDs have the form `HOST:codex:THREAD_ID`.
+
+## Pi and Hermes Adapters
+
+`native.rs` runs an embedded standard-library Python probe locally or through
+SSH. Pi reads JSONL entries as a stream, keeps only summary metadata, and uses
+message timestamps rather than filesystem touch time for chronology. Hermes
+opens each native SQLite database with `mode=ro`; optional columns are detected
+for compatibility with older schemas. It never imports Hermes, migrates a
+database, or creates an absent store. Profile-qualified Hermes IDs prevent
+sessions with the same native ID in different profiles from colliding.
+
+All adapter inventories are merged and globally sorted before the per-host
+limit is applied. The picker detail cache is keyed by the full control-plane ID,
+not the native ID shared by potentially different harnesses.
+
+Pi's optional `integrations/pi/rollcall.ts` extension publishes atomic,
+permission-restricted lifecycle records. The probe validates PID and Linux
+process start ticks, then resolves tmux ancestry only for terminal-mode Pi.
+The extension observes final `agent_settled`, not intermediate `agent_end`, and
+updates its record across session replacement. Without exact ownership evidence,
+Pi processes sharing a workspace prevent implicit resume; recency is never used
+to guess a pane binding. Custom session paths from verified records supplement
+the ordinary inventory.
+
+Hermes publishes native active-session leases. The probe validates their process
+creation time and only binds CLI surfaces to tmux; a desktop/shared server's pane
+is not a conversation frontend. Corrupt or unreadable ownership records prevent
+implicit resume. Live polls read only registered sessions rather than rescanning
+all historical transcripts. Discovery, attach, and explicit resume remain
+separate: attach rechecks ownership before handing off, while resume deliberately
+invokes the native CLI, which retains its own ownership checks.
 
 ## Tmux Adapter
 

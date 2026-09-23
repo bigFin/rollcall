@@ -23,6 +23,18 @@
           src = self;
 
           cargoLock.lockFile = ./Cargo.lock;
+          nativeCheckInputs = [
+            pkgs.bash
+            pkgs.python3
+            pkgs.nodejs
+          ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postInstall = ''
+            install -Dm644 integrations/pi/rollcall.ts $out/share/rollcall/pi/rollcall.ts
+          '';
+          postFixup = ''
+            wrapProgram $out/bin/rollcall --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 ]}
+          '';
 
           meta = {
             description = "SSH-native control plane for coding-agent sessions";
@@ -48,16 +60,19 @@
         checks.default = rollcall;
 
         devShells.default = pkgs.mkShell {
-          inputsFrom = [ rollcall ];
-
           packages = with pkgs; [
+            bash
             cargo
             clippy
             nixfmt
+            nodejs
+            openssh
+            python3
             rust-analyzer
             rustc
             rustfmt
             sqlite
+            tmux
           ];
 
           env = {

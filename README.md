@@ -24,12 +24,12 @@ nickname, but `rollcall` is the command.
 
 ## Status
 
-The first Codex-first slice works. Rollcall discovers resumable Codex and
-Oh My Pi sessions across the local machine and configured SSH hosts, sorts them
+Rollcall discovers resumable Codex, Oh My Pi, Pi, and Hermes sessions across
+the local machine and configured SSH hosts, sorts them
 by native interaction recency, distinguishes attachable tmux frontends from
 external frontends and its own backend, and hands the terminal back to the
-exact tmux pane or to the native resume command (`codex resume` or
-`omp --resume`).
+exact tmux pane or to the native resume command (`codex resume`, `omp --resume`,
+`pi --session`, or `hermes --resume`).
 
 The picker opens immediately from its SQLite snapshot, then refreshes each
 unique SSH endpoint through a bounded scheduler. Basic session rows arrive
@@ -40,7 +40,7 @@ automatic settling, offline cached sessions, and on-demand session previews are
 implemented. Meaningful lifecycle transitions also create persistent unread
 attention and local notifications while Rollcall is running.
 
-Codex and OMP inventory and resumed TUIs converge on the same harness-neutral
+Codex, OMP, Pi, and Hermes inventory and resumed TUIs converge on the same harness-neutral
 session model and control-plane dispatcher. Additional coding-agent adapters,
 background observation while every Rollcall process is closed, configurable
 stale-after rules, and the optional local broker remain ahead.
@@ -125,6 +125,54 @@ captures only when opened rather than polling pane contents continuously.
 Within it, `Enter` opens the session, `a` settles or restores it, `j/k` scrolls,
 and `Esc` closes it. Press `i` at normal terminal heights to show a compact
 selected-session strip without making every dashboard row taller by default.
+
+## Pi and Hermes
+
+Pi and Oh My Pi are separate adapters and IDs (`HOST:pi:ID` versus
+`HOST:omp:ID`). Pi discovery reads `~/.pi/agent/sessions/`, including session
+names and messages beyond the header. It honors `PI_CODING_AGENT_DIR`,
+`PI_CODING_AGENT_SESSION_DIR`, and the agent's `sessionDir` setting. Custom
+session directories are flat. Resume uses the exact JSONL path, not a fuzzy ID.
+
+For **exact Pi live status and tmux attachment**, load the bundled lifecycle
+extension on each host:
+
+```console
+pi --extension /path/to/rollcall/integrations/pi/rollcall.ts
+```
+
+For persistent loading, add that absolute path to Pi's user `extensions` setting
+and reload Pi. Nix packages also install it at
+`$out/share/rollcall/pi/rollcall.ts`. The extension publishes only PID, process
+start identity, session ID/path, and activity under
+`$XDG_CACHE_HOME/rollcall/pi` (default `~/.cache/rollcall/pi`). It does not write
+prompts or message text, and removes its record on shutdown. Valid live records
+also make sessions in per-invocation `--session-dir` locations discoverable.
+
+Without the extension, saved Pi sessions are still listed. A running bare Pi
+process cannot reliably be mapped to a session: Rollcall refuses an implicit
+resume when ownership in that working directory is uncertain, rather than
+attaching the newest file to an unrelated terminal. `rollcall resume` remains
+an explicit request to open a frontend.
+
+Hermes discovery reads `state.db` **read-only**, without importing Hermes or
+running migrations. By default it searches `~/.hermes` and its named profiles;
+`HERMES_HOME` restricts discovery to that home. IDs include the profile to avoid
+collisions, for example `HOST:hermes:main/SESSION_ID`. The `nativeSessionId`
+field is profile-qualified for Hermes. Resume selects the original profile and
+passes the unqualified ID to Hermes. Custom homes get a stable path-derived
+namespace and are resumed through `HERMES_HOME`.
+
+Hermes live ownership comes from `runtime/active_sessions.json`, with PID and
+process-start validation. Only a CLI lease with a proven tmux ancestor is
+attachable; desktop and shared gateway sessions remain external. Hermes itself
+may refuse explicit resume while another frontend owns the session.
+
+These adapters require **Python 3 on each probed host**; no Rollcall helper or
+extra Python packages are needed remotely. Live ownership checks require Linux
+`/proc`. Other Unix hosts support saved inventory and explicit resume, but not
+verified live attachment. The Pi extension tests additionally require Node.js
+24+, supplied by the development shell.
 
 ## Attention and Notifications
 
@@ -341,7 +389,7 @@ For future shell launches, enable the transparent shim:
 eval "$(rollcall shell-init)"
 ```
 
-This defines Bash/Zsh functions for `codex`, `claude`, and `pi`. From an
+This defines Bash/Zsh functions for `codex`, `claude`, `pi`, `omp`, and `hermes`. From an
 interactive shell outside tmux, the native executable starts in a temporary
 `rc-pending-*` tmux session. Inside tmux, in scripts, without tmux installed, or
 with `ROLLCALL_BYPASS=1`, the command runs normally. Once Codex exposes its
@@ -391,14 +439,23 @@ Enter the pinned development environment:
 nix develop
 ```
 
+Or run `direnv allow` once to load it automatically. The shell includes the
+Rust toolchain, Bash, SSH, tmux, SQLite, Python 3, Node.js, and Nix formatting tools; it does not
+need to build Rollcall or fetch Cargo dependencies just to open.
+
 Run the primary checks:
 
 ```console
 cargo fmt --check
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
 nix flake check
 ```
+
+Update the pinned dependencies with `nix flake update` and `cargo update`.
+Cargo updates stay within the version ranges in `Cargo.toml`; newer incompatible
+releases need a manifest update too. Add new source files to Git before running
+`nix flake check`, since Git flakes exclude untracked files.
 
 The project is intentionally not published yet. Licensing and remote repository
 creation will be settled before the first public release.
