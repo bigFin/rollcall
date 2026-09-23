@@ -90,6 +90,7 @@ impl From<StoreError> for PickerError {
 }
 
 pub fn run(initial_host: &str, limit: usize) -> Result<(), PickerError> {
+    view::theme::init()?;
     let mut app = PickerApp::new(initial_host, limit)?;
     let selection = run_terminal(&mut app)?;
     if let Some(session_id) = selection {
@@ -120,6 +121,7 @@ pub fn watch(initial_host: &str, limit: usize, once: bool, json: bool) -> Result
 }
 
 pub fn popup(initial_host: &str, limit: usize) -> Result<(), PickerError> {
+    let theme = view::theme::init()?;
     if env::var_os("TMUX").is_none() {
         return run(initial_host, limit);
     }
@@ -140,6 +142,8 @@ pub fn popup(initial_host: &str, limit: usize) -> Result<(), PickerError> {
         .args([
             "display-popup",
             "-E",
+            "-e",
+            &format!("ROLLCALL_THEME={theme}"),
             "-w",
             "90%",
             "-h",

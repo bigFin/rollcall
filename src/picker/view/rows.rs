@@ -24,7 +24,7 @@ pub(super) fn section_item(
     let marker = if expanded { "▾" } else { "▸" };
     let style = match section {
         DashboardSection::Current => Style::default()
-            .fg(palette::GREEN)
+            .fg(palette().green)
             .add_modifier(Modifier::BOLD),
         DashboardSection::LastDay | DashboardSection::LastWeek | DashboardSection::Archive => {
             Style::default().add_modifier(Modifier::BOLD)
@@ -89,22 +89,22 @@ pub(super) fn group_item(
 
 fn connectivity_label(connectivity: GroupConnectivity) -> (String, Style) {
     match connectivity {
-        GroupConnectivity::Online => (String::new(), Style::default().fg(palette::GREEN)),
+        GroupConnectivity::Online => (String::new(), Style::default().fg(palette().green)),
         GroupConnectivity::Checking => (
             " · checking".to_owned(),
-            Style::default().fg(palette::YELLOW),
+            Style::default().fg(palette().yellow),
         ),
         GroupConnectivity::Offline(retry_in) => (
             retry_in.map_or_else(
                 || " · offline".to_owned(),
                 |seconds| format!(" · offline · retry {seconds}s"),
             ),
-            Style::default().fg(palette::RED),
+            Style::default().fg(palette().red),
         ),
         GroupConnectivity::Blocked => (
             " · blocked".to_owned(),
             Style::default()
-                .fg(palette::RED)
+                .fg(palette().red)
                 .add_modifier(Modifier::BOLD),
         ),
         GroupConnectivity::Cached => (" · cached".to_owned(), muted_style()),
@@ -143,7 +143,7 @@ pub(super) fn session_item(
             if unread { "• " } else { "  " },
             if unread {
                 Style::default()
-                    .fg(palette::YELLOW)
+                    .fg(palette().yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -185,10 +185,10 @@ pub(super) fn activity_style(activity: Activity) -> (&'static str, Style, &'stat
             let (marker, color) = working_pulse();
             (marker, Style::default().fg(color), "working")
         }
-        Activity::WaitingApproval => ("◆", Style::default().fg(palette::YELLOW), "approval"),
-        Activity::WaitingInput => ("◆", Style::default().fg(palette::YELLOW), "input"),
+        Activity::WaitingApproval => ("◆", Style::default().fg(palette().yellow), "approval"),
+        Activity::WaitingInput => ("◆", Style::default().fg(palette().yellow), "input"),
         Activity::Completed => ("✓", muted_style(), "completed"),
-        Activity::Failed => ("!", Style::default().fg(palette::RED), "failed"),
+        Activity::Failed => ("!", Style::default().fg(palette().red), "failed"),
         Activity::Unknown => ("○", muted_style(), "unknown"),
     }
 }
@@ -200,6 +200,11 @@ pub(super) fn working_pulse() -> (&'static str, Color) {
     let frame = usize::try_from(frame).unwrap_or_default();
     (
         ["◐", "◓", "◑", "◒"][frame],
-        [palette::GREEN, palette::AQUA, palette::GREEN, palette::BLUE][frame],
+        [
+            palette().green,
+            palette().aqua,
+            palette().green,
+            palette().blue,
+        ][frame],
     )
 }

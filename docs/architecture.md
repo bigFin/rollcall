@@ -443,9 +443,17 @@ scrolling, attach/resume, and settle/restore without turning Rollcall into a
 conversation renderer. Capture failures retain the cached fallback and explain
 the live error.
 
-The picker uses Everforest Dark's medium-contrast RGB palette rather than
-terminal-dependent ANSI colors. Text, metadata, selection backgrounds, status
-accents, and overlays share the palette in `src/picker/view/theme.rs`.
+The picker defaults to the terminal's foreground, background, and ANSI palette.
+Secondary text is dimmed and selection uses reverse video, leaving light, dark,
+and transparent backgrounds under terminal control. `ROLLCALL_THEME=everforest`
+selects the original Everforest Dark medium-contrast RGB palette;
+`ROLLCALL_THEME=terminal` explicitly selects the default. Unknown names are
+rejected before opening the terminal or probing hosts. The choice is resolved
+once per picker process and explicitly forwarded to tmux popup children.
+
+Text, metadata, selections, status accents, and overlays share the semantic
+palette in `src/picker/view/theme.rs`. Theme tests cover color roles, selection
+contrast, popup propagation, and rendered views at different terminal sizes.
 
 The picker implementation is split by responsibility:
 

@@ -1,7 +1,7 @@
 mod overlays;
 mod rows;
 pub(in crate::picker) mod text;
-mod theme;
+pub(in crate::picker) mod theme;
 
 use ratatui::{
     Frame,
@@ -76,7 +76,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                 count(DashboardSection::Current)
             ),
             Style::default()
-                .fg(palette::GREEN)
+                .fg(palette().green)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -117,14 +117,14 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
     ]);
     let mut subtitle = vec![Span::styled(
         format!("{} up", app.reachable_hosts.len()),
-        Style::default().fg(palette::GREEN),
+        Style::default().fg(palette().green),
     )];
     if !app.pending_hosts.is_empty() {
         subtitle.extend([
             Span::raw(" · "),
             Span::styled(
                 format!("{} checking", app.pending_hosts.len()),
-                Style::default().fg(palette::YELLOW),
+                Style::default().fg(palette().yellow),
             ),
         ]);
     }
@@ -135,7 +135,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
             if app.host_errors.is_empty() {
                 muted_style()
             } else {
-                Style::default().fg(palette::RED)
+                Style::default().fg(palette().red)
             },
         ),
     ]);
@@ -145,7 +145,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
             Span::styled(
                 format!("{} unread", app.unread_ids.len()),
                 Style::default()
-                    .fg(palette::YELLOW)
+                    .fg(palette().yellow)
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
@@ -156,7 +156,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
             Span::styled(
                 format!("/{}", app.query),
                 Style::default()
-                    .fg(palette::BLUE)
+                    .fg(palette().blue)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -286,7 +286,7 @@ fn draw_selected_detail(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
         ]),
         Line::from(Span::styled(
             truncate_with_ellipsis(message, width),
-            Style::default().fg(palette::TEXT),
+            Style::default().fg(palette().text),
         )),
         Line::from(Span::styled(
             truncate_with_ellipsis(&metadata, width),
@@ -311,70 +311,70 @@ fn draw_footer(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                 Line::from(Span::styled(
                     notice.clone(),
                     Style::default()
-                        .fg(palette::GREEN)
+                        .fg(palette().green)
                         .add_modifier(Modifier::BOLD),
                 ))
             } else if let Some(status) = &app.status {
                 Line::from(Span::styled(
                     status.clone(),
-                    Style::default().fg(palette::YELLOW),
+                    Style::default().fg(palette().yellow),
                 ))
             } else if let Some(archived) = app
                 .selected_session()
                 .and_then(|session| app.archived_state_for_session(&session.id))
             {
                 Line::from(vec![
-                    Span::styled("↵", Style::default().fg(palette::BLUE)),
+                    Span::styled("↵", Style::default().fg(palette().blue)),
                     Span::raw(if archived {
                         " restore+open  "
                     } else {
                         " open  "
                     }),
-                    Span::styled("a", Style::default().fg(palette::BLUE)),
+                    Span::styled("a", Style::default().fg(palette().blue)),
                     Span::raw(if archived { " restore  " } else { " settle  " }),
-                    Span::styled("x", Style::default().fg(palette::BLUE)),
+                    Span::styled("x", Style::default().fg(palette().blue)),
                     Span::raw(" read  "),
-                    Span::styled("tab", Style::default().fg(palette::BLUE)),
+                    Span::styled("tab", Style::default().fg(palette().blue)),
                     Span::raw(" collapse group  "),
-                    Span::styled("/", Style::default().fg(palette::BLUE)),
+                    Span::styled("/", Style::default().fg(palette().blue)),
                     Span::raw(" search  "),
-                    Span::styled("?", Style::default().fg(palette::BLUE)),
+                    Span::styled("?", Style::default().fg(palette().blue)),
                     Span::raw(" keys"),
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled("↵/space/tab", Style::default().fg(palette::BLUE)),
+                    Span::styled("↵/space/tab", Style::default().fg(palette().blue)),
                     Span::raw(" toggle row  "),
-                    Span::styled("/", Style::default().fg(palette::BLUE)),
+                    Span::styled("/", Style::default().fg(palette().blue)),
                     Span::raw(" search  "),
-                    Span::styled("?", Style::default().fg(palette::BLUE)),
+                    Span::styled("?", Style::default().fg(palette().blue)),
                     Span::raw(" keys"),
                 ])
             }
         }
         InputMode::Search => Line::from(vec![
             Span::raw("type to filter  "),
-            Span::styled("ctrl-u", Style::default().fg(palette::BLUE)),
+            Span::styled("ctrl-u", Style::default().fg(palette().blue)),
             Span::raw(" clear  "),
-            Span::styled("enter/esc", Style::default().fg(palette::BLUE)),
+            Span::styled("enter/esc", Style::default().fg(palette().blue)),
             Span::raw(" done"),
         ]),
         InputMode::Hosts => Line::from(vec![
-            Span::styled("j/k", Style::default().fg(palette::BLUE)),
+            Span::styled("j/k", Style::default().fg(palette().blue)),
             Span::raw(" move  "),
-            Span::styled("enter", Style::default().fg(palette::BLUE)),
+            Span::styled("enter", Style::default().fg(palette().blue)),
             Span::raw(" filter  "),
-            Span::styled("esc", Style::default().fg(palette::BLUE)),
+            Span::styled("esc", Style::default().fg(palette().blue)),
             Span::raw(" close"),
         ]),
         InputMode::Help => Line::from(vec![
-            Span::styled("?/enter/esc", Style::default().fg(palette::BLUE)),
+            Span::styled("?/enter/esc", Style::default().fg(palette().blue)),
             Span::raw(" close help"),
         ]),
         InputMode::Preview => Line::from(vec![
-            Span::styled("enter", Style::default().fg(palette::BLUE)),
+            Span::styled("enter", Style::default().fg(palette().blue)),
             Span::raw(" open  "),
-            Span::styled("a", Style::default().fg(palette::BLUE)),
+            Span::styled("a", Style::default().fg(palette().blue)),
             Span::raw(
                 app.preview
                     .as_ref()
@@ -383,11 +383,11 @@ fn draw_footer(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                         if archived { " restore  " } else { " settle  " }
                     }),
             ),
-            Span::styled("x", Style::default().fg(palette::BLUE)),
+            Span::styled("x", Style::default().fg(palette().blue)),
             Span::raw(" read  "),
-            Span::styled("j/k", Style::default().fg(palette::BLUE)),
+            Span::styled("j/k", Style::default().fg(palette().blue)),
             Span::raw(" scroll  "),
-            Span::styled("esc", Style::default().fg(palette::BLUE)),
+            Span::styled("esc", Style::default().fg(palette().blue)),
             Span::raw(" close"),
         ]),
     };

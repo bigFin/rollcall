@@ -34,6 +34,55 @@ fn dense_rows_truncate_with_an_ellipsis() {
 }
 
 #[test]
+fn terminal_theme_keeps_default_background_across_views_and_sizes() {
+    use crate::{
+        domain::RuntimeOwner,
+        picker::{InputMode, view},
+    };
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        style::{Color, Modifier},
+    };
+
+    let mut candidate = super::session("theme", "/project", "Readable terminal title");
+    candidate.runtime = RuntimeOwner::Resumable;
+    candidate.tmux = None;
+    let mut app = super::app_with_sessions(vec![candidate], Vec::new());
+    app.start_preview();
+    for (width, height) in [(100, 24), (42, 12), (24, 8)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        for mode in [
+            InputMode::Browse,
+            InputMode::Hosts,
+            InputMode::Help,
+            InputMode::Preview,
+        ] {
+            app.input_mode = mode;
+            terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+            let cells = &terminal.backend().buffer().content;
+            assert!(
+                cells.iter().all(|cell| cell.bg == Color::Reset),
+                "{mode:?} must not paint a theme background"
+            );
+            assert!(
+                cells
+                    .iter()
+                    .all(|cell| !matches!(cell.fg, Color::Rgb(..) | Color::Indexed(_))),
+                "{mode:?} must use the terminal palette"
+            );
+            if mode == InputMode::Browse && height == 24 {
+                assert!(
+                    cells
+                        .iter()
+                        .any(|cell| cell.modifier.contains(Modifier::REVERSED))
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn session_action_feedback_survives_refresh_and_then_expires() {
     use crate::picker::{NOTICE_DURATION, PickerApp, RefreshEvent, view};
     use ratatui::{Terminal, backend::TestBackend};

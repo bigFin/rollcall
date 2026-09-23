@@ -37,7 +37,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         Line::from(Span::styled(
             "  ◐ work   ◆ attention   ✓ done   ! fail",
             Style::default()
-                .fg(palette::TEXT)
+                .fg(palette().text)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  ◌ cached / checking / offline"),
@@ -49,7 +49,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
                     .style(base_style())
                     .title(" Rollcall help ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette::BLUE)),
+                    .border_style(Style::default().fg(palette().blue)),
             )
             .wrap(Wrap { trim: false }),
         area,
@@ -66,7 +66,7 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &PickerApp) {
         .style(base_style())
         .title(" Session preview ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette::BLUE));
+        .border_style(Style::default().fg(palette().blue));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -74,7 +74,7 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &PickerApp) {
         PreviewContent::Loading => (
             "capturing live tmux pane",
             format!("{} Loading preview…", working_pulse().0),
-            Style::default().fg(palette::BLUE),
+            Style::default().fg(palette().blue),
         ),
         PreviewContent::Ready { source, body } => (*source, body.clone(), Style::default()),
         PreviewContent::Failed { error, fallback } => (
@@ -124,7 +124,7 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &PickerApp) {
             Paragraph::new(Line::from(Span::styled(
                 notice.clone(),
                 Style::default()
-                    .fg(palette::YELLOW)
+                    .fg(palette().yellow)
                     .add_modifier(Modifier::BOLD),
             )))
             .block(Block::default().borders(Borders::TOP)),
@@ -180,7 +180,7 @@ pub(super) fn draw_hosts(frame: &mut Frame<'_>, app: &PickerApp) {
                 .style(base_style())
                 .title(" Host filter ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette::BLUE)),
+                .border_style(Style::default().fg(palette().blue)),
         )
         .highlight_symbol("› ")
         .highlight_style(selection_style());
