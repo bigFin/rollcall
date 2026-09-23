@@ -83,6 +83,55 @@ fn terminal_theme_keeps_default_background_across_views_and_sizes() {
 }
 
 #[test]
+fn table_columns_align_across_different_titles_and_activities() {
+    use crate::{
+        domain::{Activity, AgentKind},
+        picker::view,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut first = super::session("table-a", "/project", "Alpha title");
+    first.activity = Activity::Working;
+    first.last_message = "First message".to_owned();
+    let mut second = super::session("table-b", "/project", "Wide 你好世界 title");
+    second.agent = AgentKind::Pi;
+    second.activity = Activity::WaitingApproval;
+    second.last_message = "Second\nmessage".to_owned();
+    let app = super::app_with_sessions(vec![first, second], Vec::new());
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = |x: u16, y: u16, len: u16| {
+        (x..x + len)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
+    let column = |label: &str| {
+        (0..120 - label.len() as u16)
+            .find(|x| text(*x, 3, label.len() as u16) == label)
+            .unwrap()
+    };
+    let harness = column("HARNESS");
+    let activity = column("ACTIVITY");
+    let updated = column("UPDATED");
+    let message = column("LAST MESSAGE");
+    for (title, agent, status, preview) in [
+        ("Alpha", "codex", "working", "First message"),
+        ("Wide", "pi", "approval", "Second message"),
+    ] {
+        let y = (4..22).find(|y| text(0, *y, 120).contains(title)).unwrap();
+        assert_eq!(text(harness, y, 7).trim(), agent);
+        assert_eq!(text(activity, y, 10).trim(), status);
+        assert!(!text(updated, y, 7).trim().is_empty());
+        assert!(text(message, y, 120 - message).starts_with(preview));
+    }
+    for (width, height) in [(80, 18), (60, 12), (24, 8), (8, 4)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| view::draw(frame, &app)).unwrap();
+    }
+}
+
+#[test]
 fn session_action_feedback_survives_refresh_and_then_expires() {
     use crate::picker::{NOTICE_DURATION, PickerApp, RefreshEvent, view};
     use ratatui::{Terminal, backend::TestBackend};

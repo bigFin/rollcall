@@ -1,9 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::{
+    layout::Constraint,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::ListItem,
+    widgets::{Cell, Row},
 };
 
 use crate::{
@@ -12,102 +13,191 @@ use crate::{
 };
 
 use super::{
-    text::{display_directory, format_age, truncate_with_ellipsis},
+    text::{compact_home, format_age},
     theme::{muted_style, palette},
 };
+
+/// One layout for the header, groups, and sessions; never size by row content.
+pub(super) struct Columns {
+    title: usize,
+    harness: bool,
+    state: bool,
+    age: bool,
+    message: usize,
+}
+
+impl Columns {
+    pub(super) fn new(width: u16) -> Self {
+        let width = usize::from(width).saturating_sub(2); // selection marker
+        let harness = width >= 74;
+        let state = width >= 58;
+        let age = width >= 22;
+        let has_message = width >= 98;
+        let fixed = usize::from(harness) * 9 + usize::from(state) * 12 + usize::from(age) * 9;
+        let remaining = width.saturating_sub(fixed + usize::from(has_message) * 2);
+        let title = if has_message {
+            (remaining / 2).min(48)
+        } else {
+            remaining
+        };
+        Self {
+            title,
+            harness,
+            state,
+            age,
+            message: if has_message { remaining - title } else { 0 },
+        }
+    }
+
+    pub(super) fn widths(&self) -> Vec<Constraint> {
+        let mut widths = vec![Constraint::Length(self.title as u16)];
+        if self.harness {
+            widths.push(Constraint::Length(7));
+        }
+        if self.state {
+            widths.push(Constraint::Length(10));
+        }
+        if self.age {
+            widths.push(Constraint::Length(7));
+        }
+        if self.message > 0 {
+            widths.push(Constraint::Length(self.message as u16));
+        }
+        widths
+    }
+
+    pub(super) fn header(&self) -> Row<'static> {
+        self.row(
+            Line::raw("SESSION / PROJECT"),
+            "HARNESS",
+            Line::raw("ACTIVITY"),
+            "UPDATED",
+            "LAST MESSAGE",
+        )
+        .style(muted_style().add_modifier(Modifier::BOLD))
+    }
+
+    fn row(
+        &self,
+        title: Line<'static>,
+        harness: &str,
+        state: Line<'static>,
+        age: &str,
+        message: &str,
+    ) -> Row<'static> {
+        let mut cells = vec![Cell::from(title)];
+        if self.harness {
+            cells.push(Cell::from(harness.to_owned()).style(muted_style()));
+        }
+        if self.state {
+            cells.push(Cell::from(state));
+        }
+        if self.age {
+            cells.push(Cell::from(age.to_owned()).style(muted_style()));
+        }
+        if self.message > 0 {
+            cells.push(Cell::from(fit(message, self.message)).style(muted_style()));
+        }
+        Row::new(cells)
+    }
+
+    fn title(&self, prefix: &str, text: &str, style: Style) -> Line<'static> {
+        let prefix_width = Line::raw(prefix).width();
+        Line::from(vec![
+            Span::styled(prefix.to_owned(), style),
+            Span::styled(fit(text, self.title.saturating_sub(prefix_width)), style),
+        ])
+    }
+}
+
+// A table cell must stay on one line and be bounded in terminal cells, not bytes
+// or Unicode scalar count (wide CJK characters otherwise overflow columns).
+fn fit(text: &str, width: usize) -> String {
+    let clean = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if Line::raw(clean.as_str()).width() <= width {
+        return clean;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut end = 0;
+    for (offset, character) in clean.char_indices() {
+        let next = offset + character.len_utf8();
+        if Line::raw(&clean[..next]).width() >= width {
+            break;
+        }
+        end = next;
+    }
+    format!("{}…", &clean[..end])
+}
 
 pub(super) fn section_item(
     section: DashboardSection,
     count: usize,
     expanded: bool,
-) -> ListItem<'static> {
-    let marker = if expanded { "▾" } else { "▸" };
-    let style = match section {
-        DashboardSection::Current => Style::default()
-            .fg(palette().green)
-            .add_modifier(Modifier::BOLD),
-        DashboardSection::LastDay | DashboardSection::LastWeek | DashboardSection::Archive => {
-            Style::default().add_modifier(Modifier::BOLD)
-        }
-    };
-    ListItem::new(Line::from(vec![
-        Span::styled(format!("{marker} "), style),
-        Span::styled(section.label(), style),
-        Span::styled(format!(" · {count}"), muted_style()),
-    ]))
+    columns: &Columns,
+) -> Row<'static> {
+    let marker = if expanded { "▾ " } else { "▸ " };
+    columns.row(
+        columns.title(
+            marker,
+            &format!("{} ({count})", section.label()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        "",
+        Line::default(),
+        "",
+        "",
+    )
 }
 
 pub(super) fn host_item(
     host: &str,
+    local: bool,
     count: usize,
     connectivity: GroupConnectivity,
     expanded: bool,
-    width: u16,
-) -> ListItem<'static> {
-    let (connectivity_label, connectivity_style) = connectivity_label(connectivity);
-    let suffix = format!(" · {count}{connectivity_label}");
-    let host_width = usize::from(width)
-        .saturating_sub(4 + suffix.chars().count())
-        .max(8);
-    let marker = if expanded { "▾" } else { "▸" };
-    ListItem::new(Line::from(vec![
-        Span::styled(
-            format!("  {marker} "),
-            connectivity_style.add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            truncate_with_ellipsis(host, host_width),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(suffix, connectivity_style),
-    ]))
+    columns: &Columns,
+) -> Row<'static> {
+    let (label, style) = connectivity_label(connectivity);
+    let marker = if expanded { "▾ " } else { "▸ " };
+    let name = format!("{host}{} ({count})", if local { " (local)" } else { "" });
+    columns.row(
+        columns.title(marker, &name, Style::default().add_modifier(Modifier::BOLD)),
+        "",
+        Line::styled(label, style),
+        "",
+        "",
+    )
 }
 
 pub(super) fn group_item(
     cwd: &str,
     count: usize,
-    connectivity: GroupConnectivity,
     expanded: bool,
-    width: u16,
-) -> ListItem<'static> {
-    let (connectivity_label, connectivity_style) = connectivity_label(connectivity);
-    let suffix = format!(" · {count}{connectivity_label}");
-    let directory = display_directory(cwd);
-    let cwd_width = usize::from(width)
-        .saturating_sub(6 + suffix.chars().count())
-        .max(8);
-    let marker = if expanded { "▾" } else { "▸" };
-    ListItem::new(Line::from(vec![
-        Span::styled(format!("    {marker} "), connectivity_style),
-        Span::styled(
-            truncate_with_ellipsis(&directory, cwd_width),
+    columns: &Columns,
+) -> Row<'static> {
+    let marker = if expanded { "  ▾ " } else { "  ▸ " };
+    columns.row(
+        columns.title(
+            marker,
+            &format!("{} ({count})", compact_home(cwd)),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(suffix, connectivity_style),
-    ]))
+        "",
+        Line::default(),
+        "",
+        "",
+    )
 }
 
-fn connectivity_label(connectivity: GroupConnectivity) -> (String, Style) {
+fn connectivity_label(connectivity: GroupConnectivity) -> (&'static str, Style) {
     match connectivity {
-        GroupConnectivity::Online => (String::new(), Style::default().fg(palette().green)),
-        GroupConnectivity::Checking => (
-            " · checking".to_owned(),
-            Style::default().fg(palette().yellow),
-        ),
-        GroupConnectivity::Offline(retry_in) => (
-            retry_in.map_or_else(
-                || " · offline".to_owned(),
-                |seconds| format!(" · offline · retry {seconds}s"),
-            ),
-            Style::default().fg(palette().red),
-        ),
-        GroupConnectivity::Blocked => (
-            " · blocked".to_owned(),
-            Style::default()
-                .fg(palette().red)
-                .add_modifier(Modifier::BOLD),
-        ),
-        GroupConnectivity::Cached => (" · cached".to_owned(), muted_style()),
+        GroupConnectivity::Online => ("online", Style::default().fg(palette().green)),
+        GroupConnectivity::Checking => ("checking", Style::default().fg(palette().yellow)),
+        GroupConnectivity::Offline(_) => ("offline", Style::default().fg(palette().red)),
+        GroupConnectivity::Blocked => ("blocked", Style::default().fg(palette().red)),
+        GroupConnectivity::Cached => ("cached", muted_style()),
     }
 }
 
@@ -115,68 +205,29 @@ pub(super) fn session_item(
     session: &Session,
     fresh: bool,
     unread: bool,
-    width: u16,
-) -> ListItem<'static> {
-    let (marker, marker_style, _) = if fresh {
+    columns: &Columns,
+) -> Row<'static> {
+    let (marker, style, label) = if fresh {
         activity_style(session.activity)
     } else {
         ("◌", muted_style(), "cached")
     };
-    let status_label = match (fresh, session.activity) {
-        (true, Activity::WaitingApproval) => "approval ",
-        (true, Activity::WaitingInput) => "input ",
-        (true, Activity::Failed) => "failed ",
-        _ => "",
-    };
-    let suffix = format!("  {}", format_age(session.last_interaction_unix_seconds));
-    let fixed_width = 2 + 2 + status_label.chars().count() + suffix.chars().count() + 2;
-    let text_width = usize::from(width).saturating_sub(fixed_width).max(8);
-    let message_is_distinct =
-        !session.last_message.is_empty() && session.last_message != session.title;
-    let title_width = if message_is_distinct {
-        (text_width / 3).clamp(12, 32).min(text_width)
+    let marker = if unread { "•" } else { marker };
+    let style = if unread {
+        Style::default().fg(palette().yellow)
     } else {
-        text_width
+        style
     };
-    let mut spans = vec![
-        Span::styled(
-            if unread { "• " } else { "  " },
-            if unread {
-                Style::default()
-                    .fg(palette().yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            },
-        ),
-        Span::styled(format!("{marker} "), marker_style),
-    ];
-    if !status_label.is_empty() {
-        spans.push(Span::styled(
-            status_label,
-            marker_style.add_modifier(Modifier::BOLD),
-        ));
-    }
-    spans.push(Span::styled(
-        truncate_with_ellipsis(&session.title, title_width),
-        if session.activity == Activity::Working && fresh {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        },
-    ));
-    if message_is_distinct {
-        let message_width = text_width.saturating_sub(title_width + 3);
-        spans.push(Span::styled(
-            format!(
-                " — {}",
-                truncate_with_ellipsis(&session.last_message, message_width)
-            ),
-            muted_style(),
-        ));
-    }
-    spans.push(Span::styled(suffix, muted_style()));
-    ListItem::new(Line::from(spans))
+    let prefix = format!("    {marker} ");
+    let mut title = columns.title(&prefix, &session.title, Style::default());
+    title.spans[0].style = style;
+    columns.row(
+        title,
+        session.agent.as_str(),
+        Line::styled(label, style),
+        &format_age(session.last_interaction_unix_seconds),
+        &session.last_message,
+    )
 }
 
 pub(super) fn activity_style(activity: Activity) -> (&'static str, Style, &'static str) {
@@ -207,4 +258,16 @@ pub(super) fn working_pulse() -> (&'static str, Color) {
             palette().blue,
         ][frame],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit;
+    #[test]
+    fn table_text_is_single_line_and_fits_wide_characters() {
+        assert_eq!(fit("hello\nworld", 20), "hello world");
+        assert_eq!(fit("你好世界", 5), "你好…");
+        assert_eq!(fit("abcdef", 4), "abc…");
+        assert_eq!(fit("hello", 0), "");
+    }
 }

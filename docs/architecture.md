@@ -424,18 +424,26 @@ agent UI. It can own the current terminal briefly or run inside
 `tmux display-popup`, but selection always exits the alternate screen before
 executing the native handoff.
 
-The dashboard combines all configured hosts into activity/recency sections:
-Currently active, Last day, Last week, and Archive. Hosts and project directories
-nest beneath each section. The host menu filters the shared projection; Tab and
-Space expand or collapse groups and sections rather than switching views.
+The dashboard nests host → project → session. The local host is always first;
+remote hosts and project paths remain alphabetical, rather than moving when
+activity or unread state changes. Sessions within a project are newest first,
+with stable IDs breaking timestamp ties. Archive is a separate, initially
+collapsed section at the bottom. Tab and Space toggle hosts, projects, and
+Archive; search temporarily expands matching groups without losing their state.
 
-Session rows show only the activity marker, native title, latest agent message,
-and native interaction age. Working markers pulse; completed rows use a quiet
-muted checkmark. An unread transition adds a yellow dot and causes its project
-group to sort ahead of ordinary activity. Runtime, full path, and native
-identity are progressively disclosed through the optional detail strip. A
-loaded-outside-tmux row is visible for awareness and follows the explicit
-reopen policy above.
+A Ratatui table shares column widths between its header and every row. Columns
+show title, harness, activity, interaction age, and latest message. Smaller
+terminals progressively hide message, harness, and textual activity columns;
+activity/unread markers remain beside titles. Paths are home-relative rather
+than ambiguous basenames. Text cells are single-line and account for wide
+Unicode characters. The detail strip and preview retain the full metadata.
+
+Header counters are independent of the tree: Live counts freshly observed
+frontends, 24h/7d count recent native interactions, and Archive counts archived
+rows. Recency totals deliberately overlap and include working, unread, and
+archived sessions. Search and host filters apply to these session totals;
+host reachability is separately labeled. Runtime ownership checks still govern
+whether a session can be attached or requires explicit resume.
 
 An on-demand preview overlay shows the newest portion of a live tmux pane when
 one is safely attachable, otherwise the last cached response. It supports

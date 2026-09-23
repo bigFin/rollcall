@@ -30,8 +30,14 @@ impl PickerApp {
                 .map(|session| session.host.clone()),
         );
         self.host_choices = hosts.into_iter().collect();
-        self.host_choices
-            .sort_by_key(|host| if host == ALL_HOSTS { 0 } else { 1 });
+        let local = agents::observed_host("local");
+        self.host_choices.sort_by_key(|host| {
+            (
+                host != ALL_HOSTS,
+                !is_local_host(host, &local),
+                host.clone(),
+            )
+        });
         if !self
             .host_choices
             .iter()
@@ -61,13 +67,19 @@ impl PickerApp {
             if (self.host_filter == ALL_HOSTS || session.host == self.host_filter)
                 && session_matches(session, &query)
             {
+                let section = if dashboard_section(
+                    session,
+                    false,
+                    self.unread_ids.contains(&session.id),
+                    now,
+                ) == DashboardSection::Archive
+                {
+                    DashboardSection::Archive
+                } else {
+                    DashboardSection::Current
+                };
                 sections
-                    .entry(dashboard_section(
-                        session,
-                        false,
-                        self.unread_ids.contains(&session.id),
-                        now,
-                    ))
+                    .entry(section)
                     .or_default()
                     .push(SessionRef::Active(index));
             }
@@ -89,15 +101,18 @@ impl PickerApp {
         }
 
         let mut rows = Vec::new();
-        for section in DashboardSection::ALL {
+        let local = agents::observed_host("local");
+        for section in [DashboardSection::Current, DashboardSection::Archive] {
             let sessions = sections.remove(&section).unwrap_or_default();
             let section_expanded =
                 self.expanded_sections.contains(&section) || (query_active && !sessions.is_empty());
-            rows.push(DashboardRow::Section {
-                section,
-                count: sessions.len(),
-                expanded: section_expanded,
-            });
+            if section == DashboardSection::Archive {
+                rows.push(DashboardRow::Section {
+                    section,
+                    count: sessions.len(),
+                    expanded: section_expanded,
+                });
+            }
             if !section_expanded {
                 continue;
             }
@@ -110,10 +125,7 @@ impl PickerApp {
                     .push(session_ref);
             }
             let mut hosts = hosts.into_iter().collect::<Vec<_>>();
-            hosts.sort_by(|left, right| {
-                self.compare_session_groups(&left.1, &right.1)
-                    .then(left.0.cmp(&right.0))
-            });
+            hosts.sort_by_key(|(host, _)| (!is_local_host(host, &local), host.clone()));
 
             for (host, sessions) in hosts {
                 let fresh = sessions.iter().any(|session_ref| {
@@ -143,19 +155,13 @@ impl PickerApp {
                         .or_default()
                         .push(session_ref);
                 }
-                let mut projects = projects.into_iter().collect::<Vec<_>>();
-                projects.sort_by(|left, right| {
-                    self.compare_session_groups(&left.1, &right.1)
-                        .then(left.0.cmp(&right.0))
-                });
-
+                // Paths remain alphabetical as status and freshness change.
                 for (cwd, mut sessions) in projects {
                     sessions.sort_by_key(|session_ref| {
                         let session = self.session_for_ref(*session_ref);
                         (
-                            !self.unread_ids.contains(&session.id),
-                            activity_priority(session.activity),
                             std::cmp::Reverse(session.last_interaction_unix_seconds),
+                            session.id.clone(),
                         )
                     });
                     let fresh = sessions.iter().any(|session_ref| {
@@ -204,51 +210,6 @@ impl PickerApp {
             })
             .or_else(|| self.rows.iter().position(is_navigable_row))
             .unwrap_or_default();
-    }
-
-    fn compare_session_groups(
-        &self,
-        left: &[SessionRef],
-        right: &[SessionRef],
-    ) -> std::cmp::Ordering {
-        let left_unread = left.iter().any(|session_ref| {
-            self.unread_ids
-                .contains(&self.session_for_ref(*session_ref).id)
-        });
-        let right_unread = right.iter().any(|session_ref| {
-            self.unread_ids
-                .contains(&self.session_for_ref(*session_ref).id)
-        });
-        let left_priority = left
-            .iter()
-            .map(|session_ref| activity_priority(self.session_for_ref(*session_ref).activity))
-            .min()
-            .unwrap_or(u8::MAX);
-        let right_priority = right
-            .iter()
-            .map(|session_ref| activity_priority(self.session_for_ref(*session_ref).activity))
-            .min()
-            .unwrap_or(u8::MAX);
-        let left_recency = left
-            .iter()
-            .map(|session_ref| {
-                self.session_for_ref(*session_ref)
-                    .last_interaction_unix_seconds
-            })
-            .max()
-            .unwrap_or_default();
-        let right_recency = right
-            .iter()
-            .map(|session_ref| {
-                self.session_for_ref(*session_ref)
-                    .last_interaction_unix_seconds
-            })
-            .max()
-            .unwrap_or_default();
-        right_unread
-            .cmp(&left_unread)
-            .then_with(|| left_priority.cmp(&right_priority))
-            .then_with(|| right_recency.cmp(&left_recency))
     }
 
     pub(super) fn session_for_ref(&self, session_ref: SessionRef) -> &Session {
@@ -338,29 +299,38 @@ impl PickerApp {
 
     pub(super) fn section_counts(&self) -> BTreeMap<DashboardSection, usize> {
         let now = unix_now_seconds();
+        let query = self.query.to_lowercase();
         let mut counts = BTreeMap::new();
-        for session in &self.active {
-            if self.host_filter == ALL_HOSTS || session.host == self.host_filter {
-                *counts
-                    .entry(dashboard_section(
-                        session,
-                        false,
-                        self.unread_ids.contains(&session.id),
-                        now,
-                    ))
-                    .or_insert(0) += 1;
-            }
-        }
-        for session in &self.settled {
-            if self.host_filter == ALL_HOSTS || session.host == self.host_filter {
-                *counts
-                    .entry(dashboard_section(
-                        session,
-                        true,
-                        self.unread_ids.contains(&session.id),
-                        now,
-                    ))
-                    .or_insert(0) += 1;
+        for (sessions, settled) in [(&self.active, false), (&self.settled, true)] {
+            for session in sessions {
+                if (self.host_filter != ALL_HOSTS && session.host != self.host_filter)
+                    || !session_matches(session, &query)
+                {
+                    continue;
+                }
+                // Recency totals overlap: live, unread, and archived sessions
+                // still count as interactions in the last 24 hours / 7 days.
+                let age = now.saturating_sub(session.last_interaction_unix_seconds);
+                if age <= DAY_SECONDS {
+                    *counts.entry(DashboardSection::LastDay).or_insert(0) += 1;
+                }
+                if age <= WEEK_SECONDS {
+                    *counts.entry(DashboardSection::LastWeek).or_insert(0) += 1;
+                }
+                if self.fresh_ids.contains(&session.id)
+                    && matches!(
+                        session.runtime,
+                        crate::domain::RuntimeOwner::TmuxFrontend
+                            | crate::domain::RuntimeOwner::ExternalFrontend
+                    )
+                {
+                    *counts.entry(DashboardSection::Current).or_insert(0) += 1;
+                }
+                if dashboard_section(session, settled, self.unread_ids.contains(&session.id), now)
+                    == DashboardSection::Archive
+                {
+                    *counts.entry(DashboardSection::Archive).or_insert(0) += 1;
+                }
             }
         }
         counts
@@ -457,6 +427,7 @@ pub(super) fn session_matches(session: &Session, query: &str) -> bool {
             session.cwd.as_str(),
             session.host.as_str(),
             session.source.as_str(),
+            session.agent.as_str(),
             activity_label(session.activity),
             session.native_session_id.as_str(),
             session
@@ -468,12 +439,6 @@ pub(super) fn session_matches(session: &Session, query: &str) -> bool {
         .any(|value| value.to_lowercase().contains(query))
 }
 
-const fn activity_priority(activity: Activity) -> u8 {
-    match activity {
-        Activity::Working => 0,
-        Activity::WaitingApproval | Activity::WaitingInput => 1,
-        Activity::Failed => 2,
-        Activity::Completed => 3,
-        Activity::Unknown => 4,
-    }
+pub(super) fn is_local_host(host: &str, local: &str) -> bool {
+    host == "local" || host == local
 }

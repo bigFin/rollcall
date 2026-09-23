@@ -43,8 +43,20 @@ rollcall watch                  # print lifecycle events and send notifications
 Replace `HOST` with an SSH alias. Rollcall follows `Include` files and combines
 aliases that point to the same SSH endpoint.
 
-Sessions are grouped by **activity and recency → host → project**. Rows show the
-session title, latest agent message, and time since the last interaction.
+Sessions are grouped by **host → project → session**, with the local host first.
+Other hosts and project paths stay alphabetical; sessions within a project are
+newest first. Archive is collapsed at the bottom.
+
+The table has fixed columns for title, harness, activity, last interaction, and
+latest message. Narrow terminals hide message and harness columns first; `i`
+and `p` show details and previews. A yellow dot marks unread activity without
+moving the project elsewhere in the list.
+
+The header separates session counts from host connectivity. **Live** counts
+freshly observed frontends; **24h** and **7d** count sessions with interactions
+in those windows, including live, unread, and archived sessions. These totals
+overlap and follow the current search and host filter. **Hosts: online** counts
+reachable machines, not active sessions.
 
 | Key | Action |
 | --- | --- |

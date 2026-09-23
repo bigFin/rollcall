@@ -278,13 +278,11 @@ enum DashboardSection {
 }
 
 impl DashboardSection {
-    const ALL: [Self; 4] = [Self::Current, Self::LastDay, Self::LastWeek, Self::Archive];
-
     const fn label(self) -> &'static str {
         match self {
-            Self::Current => "Currently active",
-            Self::LastDay => "Last day",
-            Self::LastWeek => "Last week",
+            Self::Current => "Live",
+            Self::LastDay => "24h",
+            Self::LastWeek => "7d",
             Self::Archive => "Archive",
         }
     }

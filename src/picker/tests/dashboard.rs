@@ -13,6 +13,7 @@ fn search_matches_session_metadata_status_and_last_message() {
     assert!(session_matches(&session, "picker"));
     assert!(session_matches(&session, "implementation is ready"));
     assert!(session_matches(&session, "completed"));
+    assert!(session_matches(&session, "codex"));
     assert!(session_matches(&session, "projects/rollcall"));
     assert!(session_matches(&session, "agents"));
     assert!(session_matches(&session, "019f"));
@@ -62,6 +63,31 @@ fn sessions_are_nested_beneath_directory_and_host_groups() {
         app.rows.get(project_row + 1),
         Some(DashboardRow::Session(_))
     ));
+    assert_eq!(app.visible_session_count(), 3);
+}
+
+#[test]
+fn different_activity_and_recency_share_one_host_and_project() {
+    let mut working = session("working", "/project", "Working");
+    working.activity = Activity::Working;
+    let today = session("today", "/project", "Today");
+    let mut week = session("week", "/project", "Week");
+    week.last_interaction_unix_seconds = unix_now_seconds() - 172_800;
+    let app = app_with_sessions(vec![working, today, week], Vec::new());
+    assert_eq!(
+        app.rows
+            .iter()
+            .filter(|row| matches!(row, DashboardRow::Host { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.rows
+            .iter()
+            .filter(|row| matches!(row, DashboardRow::Group { .. }))
+            .count(),
+        1
+    );
     assert_eq!(app.visible_session_count(), 3);
 }
 
@@ -156,13 +182,29 @@ fn progressive_refresh_keeps_the_same_session_selected_after_reordering() {
 }
 
 #[test]
-fn working_sessions_sort_ahead_of_newer_completed_sessions() {
+fn projects_stay_alphabetical_instead_of_jumping_when_activity_changes() {
+    let now = unix_now_seconds();
     let mut completed = session("019f", "/newer", "Completed");
-    completed.last_interaction_unix_seconds = 200;
+    completed.last_interaction_unix_seconds = now;
     let mut working = session("019e", "/older", "Working");
     working.activity = Activity::Working;
-    working.last_interaction_unix_seconds = 100;
+    working.last_interaction_unix_seconds = now - 100;
     let app = app_with_sessions(vec![completed, working], Vec::new());
+
+    assert_eq!(
+        app.selected_session().map(|session| session.title.as_str()),
+        Some("Completed")
+    );
+}
+
+#[test]
+fn unread_markers_do_not_reorder_project_groups() {
+    let completed = session("019f", "/zzz-completed", "Unread completion");
+    let mut working = session("019e", "/aaa-working", "Working");
+    working.activity = Activity::Working;
+    let mut app = app_with_sessions(vec![working, completed], Vec::new());
+    app.unread_ids.insert("topo:codex:019f".to_owned());
+    app.rebuild_rows_selecting(None);
 
     assert_eq!(
         app.selected_session().map(|session| session.title.as_str()),
@@ -171,16 +213,51 @@ fn working_sessions_sort_ahead_of_newer_completed_sessions() {
 }
 
 #[test]
-fn unread_attention_stays_ahead_of_other_current_sessions() {
-    let completed = session("019f", "/completed", "Unread completion");
-    let mut working = session("019e", "/working", "Working");
-    working.activity = Activity::Working;
-    let mut app = app_with_sessions(vec![working, completed], Vec::new());
-    app.unread_ids.insert("topo:codex:019f".to_owned());
-    app.rebuild_rows_selecting(None);
+fn local_sessions_precede_newer_working_remote_sessions() {
+    let local = crate::agents::observed_host("local");
+    let mut local_session = session("local", "/project", "Local older session");
+    local_session.host = local.clone();
+    local_session.last_interaction_unix_seconds = unix_now_seconds() - 172_800;
+    let mut remote = session("remote", "/project", "Remote working session");
+    remote.host = "aaa-remote".to_owned();
+    remote.activity = Activity::Working;
+    let mut app = app_with_sessions(vec![remote, local_session], Vec::new());
+    assert!(matches!(&app.rows[0], DashboardRow::Host { host, .. } if host == &local));
+    assert_eq!(app.selected_session().unwrap().title, "Local older session");
+    app.rebuild_host_choices();
+    assert_eq!(&app.host_choices[..2], &["all".to_owned(), local]);
+}
 
-    assert_eq!(
-        app.selected_session().map(|session| session.title.as_str()),
-        Some("Unread completion")
-    );
+#[test]
+fn recent_counts_include_live_unread_and_archived_sessions_and_respect_search() {
+    let mut working = session("working", "/project", "Recent working");
+    working.activity = Activity::Working;
+    let unread = session("unread", "/project", "Recent unread");
+    let archived = session("archived", "/project", "Recent archived");
+    let mut week = session("week", "/project", "Earlier this week");
+    week.last_interaction_unix_seconds = unix_now_seconds() - 172_800;
+    week.runtime = crate::domain::RuntimeOwner::Resumable;
+    let mut app = app_with_sessions(vec![working, unread, week], vec![archived]);
+    app.unread_ids.insert("topo:codex:unread".to_owned());
+    let counts = app.section_counts();
+    assert_eq!(counts[&DashboardSection::LastDay], 3);
+    assert_eq!(counts[&DashboardSection::LastWeek], 4);
+    assert_eq!(counts[&DashboardSection::Current], 3);
+    assert_eq!(counts[&DashboardSection::Archive], 1);
+    app.query = "recent working".to_owned();
+    assert_eq!(app.section_counts()[&DashboardSection::LastDay], 1);
+    app.host_filter = "no-such-host".to_owned();
+    assert!(app.section_counts().is_empty());
+}
+
+#[test]
+fn equal_recency_has_a_stable_id_tiebreaker() {
+    let first = session("a", "/project", "First");
+    let mut second = session("b", "/project", "Second");
+    second.last_interaction_unix_seconds = first.last_interaction_unix_seconds;
+    let mut app = app_with_sessions(vec![second, first], Vec::new());
+    assert_eq!(app.selected_session().unwrap().title, "First");
+    app.active.reverse();
+    app.rebuild_rows_selecting(None);
+    assert_eq!(app.selected_session().unwrap().title, "First");
 }

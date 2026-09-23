@@ -1,6 +1,5 @@
 use std::{
     env,
-    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -15,16 +14,6 @@ pub(in crate::picker) fn activity_label(activity: Activity) -> &'static str {
         Activity::Failed => "failed",
         Activity::Unknown => "unknown",
     }
-}
-
-pub(in crate::picker) fn display_directory(cwd: &str) -> String {
-    let compact = compact_home(cwd);
-    let path = Path::new(&compact);
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&compact)
-        .to_owned()
 }
 
 pub(in crate::picker) fn compact_home(path: &str) -> String {

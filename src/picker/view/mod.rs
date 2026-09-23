@@ -9,20 +9,21 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Table, TableState, Wrap},
 };
 
 use crate::{
+    agents,
     domain::RuntimeOwner,
     picker::{
         ALL_HOSTS, DashboardRow, DashboardSection, InputMode, PickerApp,
-        dashboard::is_navigable_row,
+        dashboard::{is_local_host, is_navigable_row},
     },
 };
 
 use self::{
     overlays::{draw_help, draw_hosts, draw_preview},
-    rows::{activity_style, group_item, host_item, section_item, session_item},
+    rows::{Columns, activity_style, group_item, host_item, section_item, session_item},
     text::{compact_home, format_age, truncate_with_ellipsis},
     theme::{base_style, muted_style, palette, selection_style},
 };
@@ -117,7 +118,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
         ),
     ]);
     let mut subtitle = vec![Span::styled(
-        format!("{} up", app.reachable_hosts.len()),
+        format!("Hosts: {} online", app.reachable_hosts.len()),
         Style::default().fg(palette().green),
     )];
     if !app.pending_hosts.is_empty() {
@@ -132,7 +133,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
     subtitle.extend([
         Span::raw(" · "),
         Span::styled(
-            format!("{} down", app.host_errors.len()),
+            format!("{} offline", app.host_errors.len()),
             if app.host_errors.is_empty() {
                 muted_style()
             } else {
@@ -174,6 +175,8 @@ fn draw_header(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
 }
 
 fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
+    let columns = Columns::new(area.width);
+    let local = agents::observed_host("local");
     let items = app
         .rows
         .iter()
@@ -182,7 +185,7 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                 section,
                 count,
                 expanded,
-            } => section_item(*section, *count, *expanded),
+            } => section_item(*section, *count, *expanded, &columns),
             DashboardRow::Host {
                 host,
                 count,
@@ -191,44 +194,39 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
                 ..
             } => host_item(
                 host,
+                is_local_host(host, &local),
                 *count,
                 app.group_connectivity(host, *fresh),
                 *expanded,
-                area.width,
+                &columns,
             ),
             DashboardRow::Group {
                 cwd,
-                host,
                 count,
-                fresh,
                 expanded,
                 ..
-            } => group_item(
-                cwd,
-                *count,
-                app.group_connectivity(host, *fresh),
-                *expanded,
-                area.width,
-            ),
+            } => group_item(cwd, *count, *expanded, &columns),
             DashboardRow::Session(session_ref) => {
                 let session = app.session_for_ref(*session_ref);
                 session_item(
                     session,
                     app.fresh_ids.contains(&session.id),
                     app.unread_ids.contains(&session.id),
-                    area.width,
+                    &columns,
                 )
             }
         })
         .collect::<Vec<_>>();
-    let list = List::new(items)
-        .highlight_style(selection_style())
+    let table = Table::new(items, columns.widths())
+        .column_spacing(2)
+        .header(columns.header())
+        .row_highlight_style(selection_style())
         .highlight_symbol("› ");
-    let mut state = ListState::default();
+    let mut state = TableState::default();
     if app.rows.get(app.selected_row).is_some_and(is_navigable_row) {
         state.select(Some(app.selected_row));
     }
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn draw_selected_detail(frame: &mut Frame<'_>, app: &PickerApp, area: Rect) {
