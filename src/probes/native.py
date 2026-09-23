@@ -1,4 +1,4 @@
-"""Read-only Pi/Hermes inventory. Runs locally or over SSH with Python's stdlib only."""
+"""Read-only native inventory. Runs locally or over SSH with Python's stdlib only."""
 import datetime
 import hashlib
 import json
@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from urllib.parse import unquote, urlsplit
+import uuid
 
 
 def seconds(value):
@@ -180,6 +182,242 @@ def hermes_inventory(live_only=False):
     return result
 
 
+def session_uuid(value):
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def claude_file(path, root):
+    # UUID basenames exclude superseded/orphaned copies and agent-* sidechains.
+    if not session_uuid(path.stem):
+        return None
+    cwd = title = summary = first_user = last_message = ""
+    recency = 0
+    activity = "unknown"
+    seen_message = False
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue  # Incomplete append or a damaged line, not a whole lost session.
+            if not isinstance(entry, dict) or entry.get("isSidechain"):
+                continue
+            kind = entry.get("type")
+            if kind == "custom-title":
+                title = text(entry.get("customTitle")) or title
+            elif kind == "summary":
+                summary = text(entry.get("summary")) or summary
+            elif kind in ("user", "assistant"):
+                message = entry.get("message")
+                if not isinstance(message, dict):
+                    continue
+                seen_message = True
+                if isinstance(entry.get("cwd"), str) and Path(entry["cwd"]).is_absolute():
+                    cwd = entry["cwd"]
+                recency = max(recency, seconds(entry.get("timestamp")))
+                content = text(message.get("content"))
+                if kind == "user":
+                    if not entry.get("isMeta") and not entry.get("isCompactSummary"):
+                        first_user = first_user or content
+                    activity = "unknown"
+                else:
+                    last_message = content or last_message
+                    activity = "completed" if message.get("stop_reason") in ("end_turn", "stop_sequence", "max_tokens") else "unknown"
+    if not seen_message:
+        return None
+    return record("claude", path.stem, cwd, title or summary or first_user or path.stem,
+                  last_message, recency, int(path.stat().st_mtime), activity, root.resolve(), path.stem)
+
+
+def claude_inventory(live_only=False):
+    # Without an independently verified identity bridge we do not claim live
+    # ownership from argv, the most recent file, or a session-registry PID alone.
+    if live_only:
+        return []
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+    rows = {}
+    for path in sorted((root / "projects").glob("*/*.jsonl")):
+        try:
+            row = claude_file(path, root)
+        except FileNotFoundError:
+            continue
+        if row:
+            key = row["rawId"]
+            previous = rows.get(key)
+            if not previous or row["session"]["lastInteractionUnixSeconds"] > previous["session"]["lastInteractionUnixSeconds"]:
+                rows[key] = row
+    return list(rows.values())
+
+
+def local_file_uri(value):
+    if not isinstance(value, str):
+        return ""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
+        path = unquote(parsed.path)
+        if Path(path).is_absolute() and "\x00" not in path:
+            return path
+    return ""
+
+
+def agy_workspace(uris, project):
+    try:
+        values = json.loads(uris or "[]")
+    except (ValueError, TypeError):
+        values = []
+    if isinstance(values, list):
+        for value in values:
+            if path := local_file_uri(value):
+                return path
+    # Project IDs are UUIDs (plus the built-in default); never interpolate an
+    # arbitrary database field into a path outside this metadata directory.
+    if session_uuid(project) or project == "default-cli-project":
+        try:
+            data = read_json(Path.home() / ".gemini/config/projects" / (project + ".json"), {})
+            for resource in data.get("projectResources", {}).get("resources", []):
+                if path := local_file_uri(resource.get("gitFolder", {}).get("folderUri")):
+                    return path
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    return ""
+
+
+def agy_inventory(live_only=False, live_ids=()):
+    root = Path.home() / ".gemini/antigravity-cli"
+    path = root / "conversation_summaries.db"
+    if not path.is_file() or (live_only and not live_ids):
+        return []
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+    connection.row_factory = sqlite3.Row
+    rows = []
+    try:
+        columns = {r[1] for r in connection.execute("PRAGMA table_info(conversation_summaries)")}
+        if not {"conversation_id", "last_modified_time", "workspace_uris"} <= columns:
+            raise RuntimeError("unsupported Antigravity summary schema: " + str(path))
+        wanted = ("conversation_id", "title", "preview", "last_modified_time", "last_user_input_time",
+                  "workspace_uris", "project_id", "parent_conversation_id", "nesting_depth", "app_data_dir", "status")
+        query = "SELECT " + ", ".join(c if c in columns else "NULL AS " + c for c in wanted) + " FROM conversation_summaries"
+        params = list(live_ids) if live_only else []
+        if live_only:
+            query += " WHERE conversation_id IN (" + ",".join("?" for _ in params) + ")"
+        for data in connection.execute(query, params):
+            identity = data["conversation_id"]
+            if not session_uuid(identity) or data["parent_conversation_id"] or data["nesting_depth"]:
+                continue
+            if data["app_data_dir"] not in (None, "", "antigravity-cli"):
+                continue  # This adapter does not open IDE-owned storage.
+            if not any((root / "conversations" / (identity + suffix)).is_file() for suffix in (".db", ".pb")):
+                continue  # A stale summary is not a resumable conversation.
+            recency = max(seconds(data["last_modified_time"]), seconds(data["last_user_input_time"]))
+            rows.append(record("agy", identity, agy_workspace(data["workspace_uris"], data["project_id"]),
+                               text(data["title"]) or text(data["preview"]) or identity,
+                               "", recency, recency, "unknown", root, identity,
+                               data["project_id"] or None))
+    finally:
+        connection.close()
+    return rows
+
+
+def is_harness_process(proc, agent):
+    argv = proc["argv"]
+    names = [Path(arg).name for arg in argv[:2]]
+    if agent == "claude":
+        return "claude" in names or any("/claude-code/" in arg and arg.endswith("cli.js") for arg in argv[:2])
+    return any(name in ("agy", "antigravity") for name in names)
+
+
+def uncertain_owners(rows, procs, agent, registered=()):
+    # A process can switch conversations without changing argv or cwd. An
+    # unmatched frontend therefore blocks implicit resume across this harness,
+    # not just whichever saved file happens to be newest in its directory.
+    if any(pid not in registered and is_harness_process(proc, agent) for pid, proc in procs.items()):
+        for row in rows:
+            row["ownershipUncertain"] = True
+
+
+def agy_presence(procs):
+    """Kernel-held locks prove presence; a leftover .lock file proves nothing."""
+    root = Path.home() / ".gemini/antigravity-cli/presence"
+    paths = {}
+    for path in root.glob("*.lock"):
+        if not session_uuid(path.stem):
+            continue
+        try:
+            stat = path.stat()
+            paths.setdefault(stat.st_ino, []).append(path)
+        except OSError:
+            continue
+    if not paths:
+        return {}
+    try:
+        lines = Path("/proc/locks").read_text().splitlines()
+    except OSError:
+        return {}
+    owners = {}
+    for line in lines:
+        fields = line.split()
+        # Blocked lock requests contain '->' and must not count as ownership.
+        if len(fields) < 8 or fields[1:4] != ["FLOCK", "ADVISORY", "WRITE"]:
+            continue
+        try:
+            pid = int(fields[4])
+            _, _, inode = fields[5].split(":")
+            candidates = paths.get(int(inode), [])
+        except ValueError:
+            continue
+        if not candidates or pid not in procs:
+            continue
+        try:
+            if process_stat(pid)[1] != procs[pid]["start"]:
+                continue  # PID was recycled since the process snapshot.
+        except (OSError, ValueError, IndexError):
+            continue
+        # Btrfs can report a different virtual device in stat() and /proc/locks.
+        # Verify the exact open file AND its fdinfo lock instead of trusting an
+        # inode alone (which can collide across mounts).
+        try:
+            for fd in Path(f"/proc/{pid}/fd").iterdir():
+                for path in candidates:
+                    try:
+                        if not os.path.samefile(fd, path):
+                            continue
+                        info = Path(f"/proc/{pid}/fdinfo/{fd.name}").read_text()
+                        held = any(line.split()[2:6] == ["FLOCK", "ADVISORY", "WRITE", str(pid)]
+                                   for line in info.splitlines() if line.startswith("lock:"))
+                        if held and pid not in owners.get(path.stem, []):
+                            owners.setdefault(path.stem, []).append(pid)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return owners
+
+
+def agy_owners(rows, procs, panes, owners):
+    registered = set()
+    for row in rows:
+        pids = owners.get(row["rawId"], [])
+        if len(pids) > 1:
+            row["ownershipUncertain"] = True
+        elif pids:
+            pid = pids[0]
+            registered.add(pid)
+            # A shared backend's lock is presence, not an attachable terminal.
+            terminal = is_harness_process(procs[pid], "agy")
+            try:
+                terminal = terminal and os.readlink(f"/proc/{pid}/fd/0").startswith("/dev/pts/")
+            except OSError:
+                terminal = False
+            set_owner(row, pid, procs, panes, terminal)
+    uncertain_owners(rows, procs, "agy", registered)
+
+
 def process_stat(pid):
     fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
     return int(fields[1]), fields[19], fields[0]  # parent PID, start ticks, state
@@ -333,12 +571,26 @@ def hermes_owners(rows, procs, panes):
 def inventory(agent, limit=None, live_only=False):
     procs = processes()
     live_states = pi_live_states(procs) if agent == "pi" else []
-    rows = pi_inventory(live_states, live_only) if agent == "pi" else hermes_inventory(live_only)
-    panes = tmux_panes() if procs else {}
+    presence = agy_presence(procs) if agent == "agy" else {}
+    if agent == "pi":
+        rows = pi_inventory(live_states, live_only)
+    elif agent == "hermes":
+        rows = hermes_inventory(live_only)
+    elif agent == "claude":
+        rows = claude_inventory(live_only)
+    elif agent == "agy":
+        rows = agy_inventory(live_only, presence)
+    else:
+        raise ValueError("unsupported adapter")
+    panes = tmux_panes() if procs and agent != "claude" else {}
     if agent == "pi":
         pi_owners(rows, procs, panes, live_states)
-    else:
+    elif agent == "hermes":
         hermes_owners(rows, procs, panes)
+    elif agent == "claude":
+        uncertain_owners(rows, procs, "claude")
+    else:
+        agy_owners(rows, procs, panes, presence)
     if not Path("/proc").is_dir():
         for row in rows:
             row["ownershipUncertain"] = True
@@ -349,7 +601,7 @@ def inventory(agent, limit=None, live_only=False):
 if __name__ == "__main__":
     try:
         agent = sys.argv[1]
-        if agent not in ("pi", "hermes"):
+        if agent not in ("pi", "hermes", "claude", "agy"):
             raise ValueError("unsupported adapter")
         limit = None if sys.argv[2] == "all" else int(sys.argv[2])
         print(json.dumps(inventory(agent, limit, len(sys.argv) > 3 and sys.argv[3] == "live")))

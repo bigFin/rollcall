@@ -1,4 +1,9 @@
-# Pi and Hermes
+# Native adapters
+
+The Python-backed adapters cover Pi, Hermes, Claude Code, and Antigravity CLI.
+Discovery reads existing files; it does not launch an agent or modify its data.
+
+## Pi sessions
 
 Pi and Oh My Pi are separate adapters and IDs (`HOST:pi:ID` versus
 `HOST:omp:ID`). Pi discovery reads `~/.pi/agent/sessions/`, including session
@@ -43,6 +48,56 @@ Hermes live ownership comes from `runtime/active_sessions.json`, with PID and
 process-start validation. Only a CLI lease with a proven tmux ancestor is
 attachable; desktop and shared gateway sessions remain external. Hermes itself
 may refuse explicit resume while another frontend owns the session.
+
+## Claude Code
+
+IDs use `HOST:claude:SESSION_UUID`. Discovery streams the main transcripts in
+`~/.claude/projects/*/*.jsonl`, or the corresponding `CLAUDE_CONFIG_DIR`.
+It reads custom titles, summaries, message text, working directories, and native
+message timestamps. Nested subagents, sidechains, and orphaned/superseded copies
+are excluded. Partial JSONL writes do not discard the rest of a transcript.
+
+Resume runs `claude --resume SESSION_UUID` in the recorded working directory,
+preserving the discovered configuration directory. A missing working directory
+is not replaced with a guess.
+
+**Live Claude ownership and activity are not yet verified.** A running Claude
+process blocks implicit resume across Claude sessions: its initial argv and cwd
+are not proof of which conversation it currently owns. Use the existing
+terminal, or explicitly request `rollcall resume HOST:claude:SESSION_UUID`.
+No Claude hooks or settings are installed automatically.
+
+References: [Claude storage layout](https://code.claude.com/docs/en/claude-directory)
+and [CLI resume](https://code.claude.com/docs/en/cli-reference).
+
+## Antigravity CLI (`agy`)
+
+IDs use `HOST:agy:CONVERSATION_UUID`. Discovery opens
+`~/.gemini/antigravity-cli/conversation_summaries.db` read-only and projects its
+metadata columns. It checks that the corresponding `conversations/ID.db` or
+`ID.pb` still exists, but does not decode the private trajectory payload.
+Child conversations, stale summaries without backing files, and IDE-owned
+records are excluded. This adapter targets the **`agy` CLI**, not the IDE.
+
+The native title (or summary preview) supplies the display title. Native summary
+and user-input timestamps supply recency. The latest-message column is blank:
+a summary preview is not proof of the last assistant message. Activity remains
+unknown rather than treating a saved RUNNING flag as evidence of current work.
+Workspace URIs are decoded as local file paths, with a fallback to the named
+project's `gitFolder.folderUri` metadata under `~/.gemini/config/projects/`.
+
+Resume runs `agy --conversation CONVERSATION_UUID`, with `--project PROJECT_ID`
+when recorded, from the original workspace. These flags were checked against
+local `agy --help`. Unknown workspaces prevent resume rather than choosing a
+potentially unrelated directory.
+
+On Linux, a **held** native `presence/ID.lock` can establish current ownership.
+The probe verifies the kernel lock against the exact open file, not merely a
+leftover lock file or matching inode. Only a recognized CLI process with a
+terminal input and a proven tmux ancestor is attachable. Other owners stay
+external; unmatched CLI processes block implicit resume. Explicit resume remains
+available, subject to Antigravity's own checks. The summary and presence formats
+are implementation details observed in September 2026, not a stable public API.
 
 ## Host requirements
 

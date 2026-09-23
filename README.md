@@ -1,7 +1,7 @@
 # rollcall
 
-Find and resume **Codex, Oh My Pi, Pi, and Hermes sessions** on your machine and
-across SSH hosts. See what is working, what needs attention, and where you left
+Find and resume **Codex, Oh My Pi, Pi, Hermes, Claude Code, and Antigravity CLI
+sessions** on your machine and across SSH hosts. See what is working, what needs attention, and where you left
 off. Open a session in its native terminal rather than another chat interface.
 
 The picker opens from a local cache, then refreshes reachable hosts. Offline
@@ -22,8 +22,8 @@ cargo install --path . --locked
 Or enter the pinned development environment with `nix develop` first. Make sure
 Cargo's bin directory (usually `~/.cargo/bin`) is on your `PATH`.
 
-Hosts need the relevant agent CLI and tmux. Remote access uses OpenSSH; Pi and
-Hermes discovery also require Python 3 on each host. Live process checks use
+Hosts need the relevant agent CLI and tmux. Remote access uses OpenSSH; Pi,
+Hermes, Claude, and Antigravity discovery also require Python 3 on each host. Live process checks use
 Linux `/proc`. You do not need to install Rollcall or run a Rollcall service on
 remote hosts.
 
@@ -118,10 +118,9 @@ Optional Bash/Zsh wrappers put future agent launches inside tmux when needed:
 eval "$(rollcall shell-init)"
 ```
 
-They cover `codex`, `claude`, `pi`, `omp`, and `hermes`. Inside tmux or in scripts,
-they run the native command normally. Set `ROLLCALL_BYPASS=1` to bypass wrapping.
-Wrapping a command does not add a discovery adapter for it—Claude discovery is
-not implemented.
+They cover `codex`, `claude`, `pi`, `omp`, `hermes`, and `agy`. Inside tmux or in
+scripts, they run the native command normally. Set `ROLLCALL_BYPASS=1` to bypass
+wrapping.
 
 Run `rollcall popup` inside tmux for an overlay, or bind it to prefix-k:
 
@@ -142,7 +141,7 @@ including `TMUX_TMPDIR` and `PATH`, take effect.
 Tmux key bindings use the server's environment. To choose a theme for this
 binding, add `ROLLCALL_THEME=tmux` before `rollcall popup` in the command.
 
-## Pi and Hermes
+## Harness setup
 
 Pi and Oh My Pi have separate inventories. Saved Pi sessions need no extra
 setup. For exact live status and tmux attachment, load the optional
@@ -150,7 +149,14 @@ setup. For exact live status and tmux attachment, load the optional
 
 Hermes discovery reads its database without changing it. Session IDs include
 the profile, and resume selects that same profile. See
-[Pi and Hermes setup](docs/native-adapters.md) for paths and ownership limits.
+[native adapter setup](docs/native-adapters.md) for paths and ownership limits.
+
+Claude Code transcripts are discovered without hooks; live ownership is not yet
+verified, so a running Claude process requires deliberate resume rather than an
+implicit second writer. Antigravity uses its `agy` CLI and read-only summary
+index, with exact live attachment only when a native presence lock proves the
+owner. Its last-message and activity fields remain unknown where the index
+cannot prove them. No agent settings are changed automatically.
 
 ## More
 

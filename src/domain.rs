@@ -8,6 +8,8 @@ pub enum AgentKind {
     Omp,
     Pi,
     Hermes,
+    Claude,
+    Agy,
 }
 
 impl AgentKind {
@@ -18,6 +20,8 @@ impl AgentKind {
             Self::Omp => "omp",
             Self::Pi => "pi",
             Self::Hermes => "hermes",
+            Self::Claude => "claude",
+            Self::Agy => "agy",
         }
     }
 
@@ -28,6 +32,8 @@ impl AgentKind {
             "omp" => Some(Self::Omp),
             "pi" => Some(Self::Pi),
             "hermes" => Some(Self::Hermes),
+            "claude" => Some(Self::Claude),
+            "agy" => Some(Self::Agy),
             _ => None,
         }
     }
@@ -180,8 +186,14 @@ mod tests {
     }
 
     #[test]
-    fn pi_omp_and_hermes_have_distinct_round_tripping_keys() {
-        for agent in [AgentKind::Pi, AgentKind::Omp, AgentKind::Hermes] {
+    fn harnesses_have_distinct_round_tripping_keys() {
+        for agent in [
+            AgentKind::Pi,
+            AgentKind::Omp,
+            AgentKind::Hermes,
+            AgentKind::Claude,
+            AgentKind::Agy,
+        ] {
             let key = SessionKey {
                 host: "topo".to_owned(),
                 agent,

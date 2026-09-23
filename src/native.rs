@@ -1,4 +1,4 @@
-//! Read-only file/SQLite adapters for Pi and Hermes, shared over local/SSH transport.
+//! Read-only file/SQLite adapters, shared over local/SSH transport.
 use std::{
     collections::BTreeMap,
     fmt,
@@ -145,16 +145,28 @@ pub fn attach(
             ))
         })?;
     if !force_resume {
+        if row.ownership_uncertain {
+            return Err(NativeError::Command(format!(
+                "{} may already be open in another frontend; refusing an implicit second writer. Use its existing terminal, or `rollcall resume` deliberately. See docs/native-adapters.md for live ownership requirements.",
+                row.session.id
+            )));
+        }
         if let Some(binding) = &row.session.tmux {
             return tmux::attach_pane(host, &binding.session, &binding.pane)
                 .map_err(NativeError::Tmux);
         }
-        if row.ownership_uncertain || row.session.runtime == RuntimeOwner::ExternalFrontend {
+        if row.session.runtime == RuntimeOwner::ExternalFrontend {
             return Err(NativeError::Command(format!(
-                "{} may already be open in another frontend; refusing an implicit second writer. Use its existing terminal, or `rollcall resume` deliberately. For Pi, load integrations/pi/rollcall.ts for exact live ownership.",
+                "{} is open outside a verified terminal; use its existing frontend or `rollcall resume` deliberately.",
                 row.session.id
             )));
         }
+    }
+    if row.session.cwd.is_empty() {
+        return Err(NativeError::Command(format!(
+            "{} has no known workspace path; reopen it in its native harness",
+            row.session.id
+        )));
     }
     let command = resume_command(&row)?;
     // Hex encoding preserves the full identity, including profile separators and punctuation.
@@ -172,6 +184,23 @@ pub fn attach(
 fn resume_command(row: &NativeSession) -> Result<String, NativeError> {
     let args = match row.session.agent {
         AgentKind::Pi => vec!["pi", "--session", &row.locator],
+        AgentKind::Claude => {
+            return shlex::try_join([
+                "env",
+                &format!("CLAUDE_CONFIG_DIR={}", row.locator),
+                "claude",
+                "--resume",
+                &row.raw_id,
+            ])
+            .map_err(|error| NativeError::Command(error.to_string()));
+        }
+        AgentKind::Agy => {
+            let mut args = vec!["agy", "--conversation", &row.raw_id];
+            if let Some(project) = row.profile.as_deref() {
+                args.extend(["--project", project]);
+            }
+            args
+        }
         AgentKind::Hermes => {
             let Some(profile) = row.profile.as_deref() else {
                 return shlex::try_join([
@@ -218,6 +247,38 @@ mod tests {
         assert_eq!(
             shlex::split(&resume_command(&row("hermes")).unwrap()).unwrap(),
             ["hermes", "--profile", "main", "--resume", "raw-id"]
+        );
+    }
+
+    #[test]
+    fn claude_and_agy_resume_preserve_exact_identity_and_configuration() {
+        let claude = row("claude");
+        assert_eq!(
+            shlex::split(&resume_command(&claude).unwrap()).unwrap(),
+            [
+                "env",
+                &format!("CLAUDE_CONFIG_DIR={}", claude.locator),
+                "claude",
+                "--resume",
+                "raw-id"
+            ]
+        );
+        let mut agy = row("agy");
+        agy.profile = Some("a project 'quoted'".to_owned());
+        assert_eq!(
+            shlex::split(&resume_command(&agy).unwrap()).unwrap(),
+            [
+                "agy",
+                "--conversation",
+                "raw-id",
+                "--project",
+                "a project 'quoted'"
+            ]
+        );
+        agy.profile = None;
+        assert_eq!(
+            shlex::split(&resume_command(&agy).unwrap()).unwrap(),
+            ["agy", "--conversation", "raw-id"]
         );
     }
 

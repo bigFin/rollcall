@@ -1,6 +1,6 @@
 use std::{fmt, fmt::Write as _};
 
-const DEFAULT_AGENTS: &[&str] = &["codex", "claude", "pi", "omp", "hermes"];
+const DEFAULT_AGENTS: &[&str] = &["codex", "claude", "pi", "omp", "hermes", "agy"];
 
 #[derive(Debug)]
 pub enum ShellError {
@@ -122,14 +122,14 @@ mod tests {
         let output = Command::new("bash")
             .args([
                 "-c",
-                &format!("{script}\ntype -t codex claude pi omp hermes"),
+                &format!("{script}\ntype -t codex claude pi omp hermes agy"),
             ])
             .output()
             .expect("bash should start");
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            "function\n".repeat(5)
+            "function\n".repeat(6)
         );
     }
 

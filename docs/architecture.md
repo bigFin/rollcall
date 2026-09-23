@@ -30,7 +30,7 @@ communicate over a Unix-domain socket and exit after an idle period rather than
 becoming mandatory infrastructure.
 
 Remote hosts require their existing SSH server, tmux installation when used,
-and the coding-agent CLIs already present there. Pi and Hermes probes also
+and the coding-agent CLIs already present there. Pi, Hermes, Claude Code, and Antigravity CLI probes also
 require Python 3 with its standard library. Probes and protocol clients are
 launched over SSH and live only while they are needed.
 
@@ -45,7 +45,7 @@ Harness-specific adapters normalize only:
 
 The stored session record, stable key, runtime ownership, activity state, tmux
 binding, and picker/store integration are harness-neutral. The adapter
-dispatcher currently routes those operations to Codex, OMP, Pi, and Hermes;
+dispatcher currently routes those operations to Codex, OMP, Pi, Hermes, Claude Code, and Antigravity CLI;
 each adapter owns native discovery, live observation, and attach/resume behavior.
 
 The control plane does not normalize conversation rendering, tools, subagents,
@@ -247,10 +247,10 @@ model. Rollcall resumes them with `omp --resume`. For an OMP session already
 running in tmux, it correlates the native resume ID from the agent process and
 attaches to that pane rather than creating another `rc-omp-*` container.
 
-## Pi and Hermes Adapters
+## Python-backed Native Adapters
 
-See [Pi and Hermes setup](native-adapters.md) for session paths, profile handling,
-and the optional Pi lifecycle extension.
+See [native adapter setup](native-adapters.md) for session paths, profile handling,
+live ownership limits, and the optional Pi lifecycle extension.
 
 `native.rs` runs an embedded standard-library Python probe locally or through
 SSH. Pi reads JSONL entries as a stream, keeps only summary metadata, and uses
@@ -280,6 +280,19 @@ implicit resume. Live polls read only registered sessions rather than rescanning
 all historical transcripts. Discovery, attach, and explicit resume remain
 separate: attach rechecks ownership before handing off, while resume deliberately
 invokes the native CLI, which retains its own ownership checks.
+
+Claude Code discovery streams main JSONL transcripts from its configuration
+home, excluding child and superseded transcripts. Resume preserves that home
+and uses the exact UUID. Without a verified ownership bridge, a running Claude
+process prevents implicit resume; argv/cwd are not treated as session identity.
+
+Antigravity CLI discovery reads only its SQLite summary columns. Opaque native
+trajectories remain untouched; backed main conversations are listed with native
+timestamps and workspace/project identity. Linux presence locks are matched to
+the exact open file and owner process. CLI owners with terminal input and tmux
+ancestry can be attached; shared/external owners cannot. A stale status string
+never becomes a live activity signal. Both new adapters use the same existing
+local/SSH transport and explicit resume boundary.
 
 ## Tmux Adapter
 

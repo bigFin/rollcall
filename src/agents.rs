@@ -57,6 +57,8 @@ pub fn discover(host: &str, limit: Option<usize>) -> Result<Vec<Session>, AgentE
         omp::discover(host, limit).map_err(AgentError::from),
         native::discover(host, AgentKind::Pi, limit).map_err(AgentError::from),
         native::discover(host, AgentKind::Hermes, limit).map_err(AgentError::from),
+        native::discover(host, AgentKind::Claude, limit).map_err(AgentError::from),
+        native::discover(host, AgentKind::Agy, limit).map_err(AgentError::from),
     ];
     let mut sessions = Vec::new();
     let mut first_error = None;
@@ -134,7 +136,12 @@ pub fn observe_live(host: &str) -> Result<BTreeMap<String, LiveObservation>, Age
             omp_observations,
         ));
     }
-    for agent in [AgentKind::Pi, AgentKind::Hermes] {
+    for agent in [
+        AgentKind::Pi,
+        AgentKind::Hermes,
+        AgentKind::Claude,
+        AgentKind::Agy,
+    ] {
         observations.extend(qualify_live_observations(
             &observed_host,
             agent,
@@ -169,7 +176,7 @@ pub fn attach(session_id: &str) -> Result<(), AgentError> {
     match key.agent {
         AgentKind::Codex => codex::attach(&key.host, &key.native_session_id).map_err(Into::into),
         AgentKind::Omp => omp::attach(&key.host, &key.native_session_id).map_err(Into::into),
-        AgentKind::Pi | AgentKind::Hermes => {
+        AgentKind::Pi | AgentKind::Hermes | AgentKind::Claude | AgentKind::Agy => {
             native::attach(&key.host, key.agent, &key.native_session_id, false).map_err(Into::into)
         }
     }
@@ -181,7 +188,7 @@ pub fn resume(session_id: &str) -> Result<(), AgentError> {
     match key.agent {
         AgentKind::Codex => codex::resume(&key.host, &key.native_session_id).map_err(Into::into),
         AgentKind::Omp => omp::resume(&key.host, &key.native_session_id).map_err(Into::into),
-        AgentKind::Pi | AgentKind::Hermes => {
+        AgentKind::Pi | AgentKind::Hermes | AgentKind::Claude | AgentKind::Agy => {
             native::attach(&key.host, key.agent, &key.native_session_id, true).map_err(Into::into)
         }
     }
