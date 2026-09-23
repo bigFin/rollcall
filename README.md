@@ -1,13 +1,8 @@
 # rollcall
 
-Find and resume **Codex, Oh My Pi, Pi, Hermes, Claude Code, and Antigravity CLI
-sessions** on your machine and across SSH hosts. See what is working, what needs attention, and where you left
-off. Open a session in its native terminal rather than another chat interface.
-
-The picker opens from a local cache, then refreshes reachable hosts. Offline
-hosts stay visible without blocking navigation. You can search session titles
-and last messages, inspect recent output, or archive sessions without deleting
-their native history.
+A terminal picker for coding-agent sessions on your machine and over SSH.
+Find a session, preview its output, and open it in the agent's own terminal.
+Supports Codex, Oh My Pi, Pi, Hermes, Claude Code, and Antigravity CLI (`agy`).
 
 ## Install
 
@@ -19,153 +14,66 @@ cd rollcall
 cargo install --path . --locked
 ```
 
-Or enter the pinned development environment with `nix develop` first. Make sure
-Cargo's bin directory (usually `~/.cargo/bin`) is on your `PATH`.
+For a pinned toolchain, run `nix develop` before installing. Make sure Cargo's
+bin directory (usually `~/.cargo/bin`) is on your `PATH`.
 
-Hosts need the relevant agent CLI and tmux. Remote access uses OpenSSH; Pi,
-Hermes, Claude, and Antigravity discovery also require Python 3 on each host. Live process checks use
-Linux `/proc`. You do not need to install Rollcall or run a Rollcall service on
-remote hosts.
+Hosts need tmux and the relevant agent CLI. SSH access uses OpenSSH; Pi, Hermes,
+Claude, and Antigravity discovery also need Python 3. Live ownership checks use
+Linux `/proc`. Remote hosts do not need Rollcall installed.
 
-## Use it
+## Use
 
-Launch agents normally in your project directories, preferably inside tmux.
-Rollcall finds existing sessions; it does not start new work.
+Launch agents normally, preferably inside tmux, then open Rollcall:
 
 ```sh
-rollcall                        # open the picker
-rollcall hosts                  # list aliases from ~/.ssh/config
-rollcall list --host HOST        # inspect one host
-rollcall history --search QUERY  # search cached sessions without contacting hosts
-rollcall watch                  # print lifecycle events and send notifications
+rollcall                        # interactive picker
+rollcall hosts                  # hosts from ~/.ssh/config
+rollcall list --host HOST        # sessions on one SSH host
+rollcall history --search QUERY  # search the local cache
+rollcall watch                  # watch activity and send notifications
 ```
 
-Replace `HOST` with an SSH alias. Rollcall follows `Include` files and combines
-aliases that point to the same SSH endpoint.
+The picker loads cached sessions first, then refreshes hosts. Local sessions
+come first, grouped by **host → project → session**. Columns keep titles,
+harnesses, activity, last-interaction times, and messages aligned.
 
-Sessions are grouped by **host → project → session**, with the local host first.
-Other hosts and project paths stay alphabetical; sessions within a project are
-newest first. Archive is collapsed at the bottom.
+Use arrows or `j`/`k` to move, `/` to search, and `Enter` to open a session.
+`Tab` folds groups, `h` chooses a host, `p` previews output, and `i` shows details.
+`a` archives or restores a session without deleting its history. Press `?` for
+all keys or `q` to quit. Search includes archived sessions.
 
-The table has fixed columns for title, harness, activity, last interaction, and
-latest message. Narrow terminals hide message and harness columns first; `i`
-and `p` show details and previews. A yellow dot marks unread activity without
-moving the project elsewhere in the list.
+**24h** and **7d** count sessions with recent interactions, including live and
+archived sessions; the totals overlap. **Hosts: online** counts machines, not sessions.
+If a session may already be open elsewhere, Rollcall refuses to start another
+frontend unless you explicitly request `rollcall resume SESSION_ID`.
 
-The header separates session counts from host connectivity. **Live** counts
-freshly observed frontends; **24h** and **7d** count sessions with interactions
-in those windows, including live, unread, and archived sessions. These totals
-overlap and follow the current search and host filter. **Hosts: online** counts
-reachable machines, not active sessions.
+## Tmux and colors
 
-| Key | Action |
-| --- | --- |
-| `j` / `k`, arrows | Move |
-| `Enter` | Open a session, or toggle a group |
-| `Tab`, `Space` | Expand or collapse a group |
-| `/` | Search titles, messages, paths, and metadata |
-| `h` | Choose a host |
-| `[` / `]`, `0` | Previous/next host; all hosts |
-| `p`, `i` | Preview output; toggle session details |
-| `a`, `x` | Settle/restore; mark read |
-| `r` | Refresh or retry hosts |
-| `?` | Show all keys |
-| `q`, `Esc` | Close an overlay or quit |
-
-Settling a session hides it from the active view; it does not delete anything
-from the agent. Idle sessions settle after seven days unless they have unread
-notifications. Search includes archived sessions, and opening one restores it.
-
-Opening a session attaches to its existing tmux pane when possible. Rollcall
-will not silently start a second frontend for a session already owned elsewhere.
-Use `rollcall resume SESSION_ID` only when you deliberately want another
-frontend; the agent may still enforce its own ownership rules.
-
-## Appearance
-
-By default, Rollcall uses your terminal's foreground, background, and ANSI
-palette. Secondary text is dimmed and selection uses reverse video. It does not
-force a dark background or guess whether your terminal is light or dark.
-
-For a fixed color scheme, choose Everforest Dark:
-
-```sh
-ROLLCALL_THEME=everforest rollcall
-```
-
-To explicitly use the terminal palette:
-
-```sh
-ROLLCALL_THEME=terminal rollcall
-```
-
-Use `ROLLCALL_THEME=tmux` to borrow colors from tmux instead. It reads
-`popup-style` (falling back to `status-style`), `popup-border-style`, and the
-current/activity/bell window styles. Missing colors keep their terminal
-defaults. Outside tmux, this mode behaves like `terminal`.
-
-Export `ROLLCALL_THEME` in your shell configuration to keep a preference.
-Everforest uses RGB colors and needs a truecolor-capable terminal. All modes
-apply to the dashboard, menus, previews, and `rollcall popup`. Reopen the picker
-after changing the setting or tmux styles. Custom theme files are not supported
-yet.
-
-## Shell and tmux
-
-Optional Bash/Zsh wrappers put future agent launches inside tmux when needed:
-
-```sh
-eval "$(rollcall shell-init)"
-```
-
-They cover `codex`, `claude`, `pi`, `omp`, `hermes`, and `agy`. Inside tmux or in
-scripts, they run the native command normally. Set `ROLLCALL_BYPASS=1` to bypass
-wrapping.
-
-Run `rollcall popup` inside tmux for an overlay, or bind it to prefix-k:
+Run `rollcall popup` inside tmux, or bind it to prefix-k:
 
 ```tmux
 bind-key k run-shell -b 'ROLLCALL_TMUX_CLIENT=#{q:client_name} rollcall popup'
 ```
 
-Use the popup command rather than wrapping `rollcall pick` in `display-popup`.
-It closes the overlay before attaching and targets the client that opened it.
-Remote selections replace that client with SSH; the local session keeps
-running. Detaching remotely returns you to the original local session and
-socket. If SSH fails, press Enter after reading the error to return. Escape in
-the picker cancels without detaching.
+Use `popup`, not a manually wrapped `pick`: it closes the overlay before
+attaching and targets the client that opened it.
 
-Remote tmux commands run through `bash -lc` so the host's login settings,
-including `TMUX_TMPDIR` and `PATH`, take effect.
+To put future agent launches inside tmux automatically, add this to Bash/Zsh:
 
-Tmux key bindings use the server's environment. To choose a theme for this
-binding, add `ROLLCALL_THEME=tmux` before `rollcall popup` in the command.
+```sh
+eval "$(rollcall shell-init)"
+```
 
-## Harness setup
+Rollcall uses your terminal colors by default. Set `ROLLCALL_THEME=everforest`
+for Everforest Dark or `ROLLCALL_THEME=tmux` to use tmux's colors. Reopen the
+picker after changing themes. Tmux bindings use the server's environment.
 
-Pi and Oh My Pi have separate inventories. Saved Pi sessions need no extra
-setup. For exact live status and tmux attachment, load the optional
-[Pi lifecycle extension](docs/native-adapters.md#pi-live-status).
+## Details
 
-Hermes discovery reads its database without changing it. Session IDs include
-the profile, and resume selects that same profile. See
-[native adapter setup](docs/native-adapters.md) for paths and ownership limits.
+- [Adapter setup and limits](docs/native-adapters.md): Pi's optional live-status
+  extension, Hermes profiles, Claude ownership limits, and Antigravity CLI support.
+- [Notifications](docs/architecture.md#notifications-and-watching) and
+  [cache storage](docs/architecture.md#persistence).
+- [Architecture and development](docs/architecture.md).
 
-Claude Code transcripts are discovered without hooks; live ownership is not yet
-verified, so a running Claude process requires deliberate resume rather than an
-implicit second writer. Antigravity uses its `agy` CLI and read-only summary
-index, with exact live attachment only when a native presence lock proves the
-owner. Its last-message and activity fields remain unknown where the index
-cannot prove them. No agent settings are changed automatically.
-
-## More
-
-- [Notifications and `watch`](docs/architecture.md#notifications-and-watching):
-  desktop/Termux hooks, JSON events, and one-shot checks.
-- [Cache and history](docs/architecture.md#persistence): state location and offline queries.
-- [Architecture](docs/architecture.md): adapters, ownership, host refreshes, and picker modules.
-- [Development checks](docs/architecture.md#development).
-
-Run `rollcall --help` or `rollcall COMMAND --help` for options. `--json` prints
-structured inventory data; `watch --json` prints one event per line. When stdout
-is redirected, bare `rollcall` lists sessions instead of opening the picker.
+Run `rollcall --help` for commands and options. `--json` prints structured output.
