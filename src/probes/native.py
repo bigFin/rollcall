@@ -547,7 +547,7 @@ def hermes_owners(rows, procs, panes):
                     continue  # Dead lease with a reused PID.
                 registered.add(pid)
                 # Shared gateway/desktop backends are not terminal frontends.
-                set_owner(row, pid, procs, panes, entry.get("surface") == "cli")
+                set_owner(row, pid, procs, panes, entry.get("surface") in ("cli", "tui"))
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             for row in sessions.values():
                 row["ownershipUncertain"] = True
@@ -557,7 +557,7 @@ def hermes_owners(rows, procs, panes):
             if pid in registered:
                 continue
             targets = [Path(arg).name for arg in proc["argv"][:2]]
-            if not any(name in ("hermes", "hermes-agent", "run_agent.py") for name in targets):
+            if not any(name in ("hermes", "hermes-agent", "hermes-runtime", "run_agent.py") for name in targets):
                 continue
             try:
                 opened = {os.readlink(fd).removesuffix(" (deleted)") for fd in Path(f"/proc/{pid}/fd").iterdir()}

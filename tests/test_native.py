@@ -147,6 +147,11 @@ class NativeInventoryTests(unittest.TestCase):
         rows = native.hermes_inventory()
         native.hermes_owners(rows, procs, panes)
         self.assertEqual(rows[0]["session"]["runtime"], "tmuxFrontend")
+        entry["surface"] = "tui"
+        (root / "active_sessions.json").write_text(json.dumps({"entries": [entry]}))
+        rows = native.hermes_inventory()
+        native.hermes_owners(rows, procs, panes)
+        self.assertEqual(rows[0]["session"]["runtime"], "tmuxFrontend")
         entry["process_start_time"] -= 10
         (root / "active_sessions.json").write_text(json.dumps({"entries": [entry]}))
         rows = native.hermes_inventory()

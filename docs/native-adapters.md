@@ -1,6 +1,6 @@
 # Native adapters
 
-The Python-backed adapters cover Pi, Hermes, Claude Code, and Antigravity CLI.
+The Python-backed adapters cover Pi, Hermes Agent, Claude Code, and Antigravity CLI.
 Discovery reads existing files; it does not launch an agent or modify its data.
 
 ## Pi sessions
@@ -34,18 +34,19 @@ resume when ownership in that working directory is uncertain, rather than
 attaching the newest file to an unrelated terminal. `rollcall resume` remains
 an explicit request to open a frontend.
 
-## Hermes profiles and ownership
+## Hermes Agent profiles and ownership
 
-Hermes discovery reads `state.db` **read-only**, without importing Hermes or
-running migrations. By default it searches `~/.hermes` and its named profiles;
-`HERMES_HOME` restricts discovery to that home. IDs include the profile to avoid
-collisions, for example `HOST:hermes:main/SESSION_ID`. The `nativeSessionId`
-field is profile-qualified for Hermes. Resume selects the original profile and
-passes the unqualified ID to Hermes. Custom homes get a stable path-derived
-namespace and are resumed through `HERMES_HOME`.
+Hermes Agent (`hermes` / `hermes-agent`) discovery reads `state.db` **read-only**,
+without importing Hermes or running migrations. By default it searches `~/.hermes`
+and its named profiles; `HERMES_HOME` restricts discovery to that home. IDs include
+the profile to avoid collisions, for example `HOST:hermes:main/SESSION_ID` (and
+the alias `HOST:hermes-agent:...` is accepted). The `nativeSessionId` field is
+profile-qualified for Hermes. Resume selects the original profile and passes the
+unqualified ID to Hermes. Custom homes get a stable path-derived namespace and
+are resumed through `HERMES_HOME`.
 
 Hermes live ownership comes from `runtime/active_sessions.json`, with PID and
-process-start validation. Only a CLI lease with a proven tmux ancestor is
+process-start validation. Only a CLI or TUI lease with a proven tmux ancestor is
 attachable; desktop and shared gateway sessions remain external. Hermes itself
 may refuse explicit resume while another frontend owns the session.
 

@@ -274,7 +274,7 @@ to guess a pane binding. Custom session paths from verified records supplement
 the ordinary inventory.
 
 Hermes publishes native active-session leases. The probe validates their process
-creation time and only binds CLI surfaces to tmux; a desktop/shared server's pane
+creation time and only binds CLI or TUI surfaces to tmux; a desktop/shared server's pane
 is not a conversation frontend. Corrupt or unreadable ownership records prevent
 implicit resume. Live polls read only registered sessions rather than rescanning
 all historical transcripts. Discovery, attach, and explicit resume remain

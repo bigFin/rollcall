@@ -61,7 +61,7 @@ fn invoke(row: Value, action: &str, remote: bool) -> (Output, String) {
 
 #[test]
 fn new_adapters_dispatch_exact_local_resume_commands() {
-    for agent in ["claude", "agy"] {
+    for agent in ["claude", "agy", "hermes"] {
         let (output, trace) = invoke(row(agent), "attach", false);
         assert!(
             output.status.success(),
@@ -85,7 +85,7 @@ fn new_adapters_dispatch_exact_local_resume_commands() {
                     ID
                 ]
             );
-        } else {
+        } else if agent == "agy" {
             assert_eq!(
                 command,
                 [
@@ -96,13 +96,43 @@ fn new_adapters_dispatch_exact_local_resume_commands() {
                     "a project 'quoted'"
                 ]
             );
+        } else if agent == "hermes" {
+            assert_eq!(
+                command,
+                ["hermes", "--profile", "a project 'quoted'", "--resume", ID]
+            );
         }
     }
+
+    // Hermes custom home without a named profile uses HERMES_HOME and default profile
+    let mut custom_hermes = row("hermes");
+    custom_hermes["profile"] = json!(null);
+    let (output, trace) = invoke(custom_hermes, "attach", false);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let args: Vec<_> = trace.lines().collect();
+    let login = shlex::split(args[6]).unwrap();
+    let command = shlex::split(&login[3]).unwrap();
+    assert_eq!(
+        command,
+        [
+            "env",
+            "HERMES_HOME=/config/Claude's directory",
+            "hermes",
+            "--profile",
+            "default",
+            "--resume",
+            ID
+        ]
+    );
 }
 
 #[test]
 fn uncertain_ownership_blocks_attach_even_with_a_tmux_binding_but_allows_explicit_resume() {
-    for agent in ["claude", "agy"] {
+    for agent in ["claude", "agy", "hermes"] {
         let mut candidate = row(agent);
         candidate["ownershipUncertain"] = json!(true);
         candidate["session"]["tmux"] = json!({"session":"existing", "pane":"%9"});

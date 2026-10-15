@@ -31,7 +31,7 @@ impl AgentKind {
             "codex" => Some(Self::Codex),
             "omp" => Some(Self::Omp),
             "pi" => Some(Self::Pi),
-            "hermes" => Some(Self::Hermes),
+            "hermes" | "hermes-agent" | "hermes_agent" => Some(Self::Hermes),
             "claude" => Some(Self::Claude),
             "agy" => Some(Self::Agy),
             _ => None,
@@ -265,5 +265,15 @@ mod tests {
                 .expect("new runtime should serialize"),
             json!("externalFrontend")
         );
+    }
+
+    #[test]
+    fn hermes_agent_aliases_parse_to_hermes() {
+        assert_eq!(AgentKind::parse("hermes"), Some(AgentKind::Hermes));
+        assert_eq!(AgentKind::parse("hermes-agent"), Some(AgentKind::Hermes));
+        assert_eq!(AgentKind::parse("hermes_agent"), Some(AgentKind::Hermes));
+        let key = SessionKey::parse("topo:hermes-agent:main/session-1").unwrap();
+        assert_eq!(key.agent, AgentKind::Hermes);
+        assert_eq!(key.stable_id(), "topo:hermes:main/session-1");
     }
 }

@@ -2,7 +2,7 @@
 
 A terminal picker for coding-agent sessions on your machine and over SSH.
 Find a session, preview its output, and open it in the agent's own terminal.
-Supports Codex, Oh My Pi, Pi, Hermes, Claude Code, and Antigravity CLI (`agy`).
+Supports Codex, Oh My Pi, Pi, Hermes Agent, Claude Code, and Antigravity CLI (`agy`).
 
 ## Install
 
@@ -17,7 +17,7 @@ cargo install --path . --locked
 For a pinned toolchain, run `nix develop` before installing. Make sure Cargo's
 bin directory (usually `~/.cargo/bin`) is on your `PATH`.
 
-Hosts need tmux and the relevant agent CLI. SSH access uses OpenSSH; Pi, Hermes,
+Hosts need tmux and the relevant agent CLI. SSH access uses OpenSSH; Pi, Hermes Agent,
 Claude, and Antigravity discovery also need Python 3. Live ownership checks use
 Linux `/proc`. Remote hosts do not need Rollcall installed.
 
@@ -71,7 +71,7 @@ picker after changing themes. Tmux bindings use the server's environment.
 ## Details
 
 - [Adapter setup and limits](docs/native-adapters.md): Pi's optional live-status
-  extension, Hermes profiles, Claude ownership limits, and Antigravity CLI support.
+  extension, Hermes Agent profiles and ownership, Claude ownership limits, and Antigravity CLI support.
 - [Notifications](docs/architecture.md#notifications-and-watching) and
   [cache storage](docs/architecture.md#persistence).
 - [Architecture and development](docs/architecture.md).
