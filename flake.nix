@@ -8,40 +8,16 @@
 
   outputs =
     {
-      self,
       nixpkgs,
       flake-utils,
+      ...
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
 
-        rollcall = pkgs.rustPlatform.buildRustPackage {
-          pname = "rollcall";
-          version = "0.1.0";
-          src = self;
-
-          cargoLock.lockFile = ./Cargo.lock;
-          nativeCheckInputs = [
-            pkgs.bash
-            pkgs.python3
-            pkgs.nodejs
-          ];
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          postInstall = ''
-            install -Dm644 integrations/pi/rollcall.ts $out/share/rollcall/pi/rollcall.ts
-          '';
-          postFixup = ''
-            wrapProgram $out/bin/rollcall --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 ]}
-          '';
-
-          meta = {
-            description = "SSH-native control plane for coding-agent sessions";
-            mainProgram = "rollcall";
-            platforms = pkgs.lib.platforms.unix;
-          };
-        };
+        rollcall = pkgs.callPackage ./package.nix { };
       in
       {
         formatter = pkgs.nixfmt;
